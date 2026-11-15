@@ -1,0 +1,30 @@
+[package]
+name = "aiom"
+version = "0.1.0"
+edition = "2021"
+description = "All-in-One account manager for AI coding CLIs: Claude, Codex, Gemini, Grok, OpenCode and more"
+license = "MIT"
+readme = "README.md"
+
+[[bin]]
+name = "aiom"
+path = "src/main.rs"
+
+[workspace]
+members = [".", "app"]
+default-members = ["."]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

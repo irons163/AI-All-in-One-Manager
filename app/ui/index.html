@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIOM</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <div>
+        <strong>AIOM</strong>
+        <small>AI 帳號管理</small>
+      </div>
+    </div>
+    <nav id="providers" class="providers" aria-label="Provider"></nav>
+    <button id="refresh" class="ghost refresh" type="button">重新整理</button>
+  </aside>
+
+  <main id="main" class="main" aria-live="polite">
+    <p class="empty">載入中…</p>
+  </main>
+
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+
+  <dialog id="dialog" class="dialog">
+    <form method="dialog" id="dialog-form">
+      <h2 id="dialog-title"></h2>
+      <p id="dialog-body"></p>
+      <div id="dialog-fields"></div>
+      <p id="dialog-error" class="field-error" hidden></p>
+      <menu>
+        <button type="button" id="dialog-cancel" class="ghost">取消</button>
+        <button type="submit" id="dialog-ok" class="primary">確定</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <script src="mock.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

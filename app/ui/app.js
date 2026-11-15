@@ -1,0 +1,408 @@
+// AIOM window. All state lives in the Rust side; this file asks for an
+// overview, draws it, and sends the user's actions back.
+
+const call = window.__TAURI__
+  ? (command, args) => window.__TAURI__.core.invoke(command, args)
+  : window.aiomMock; // opened in a plain browser: demo data, nothing is touched
+
+const state = { providers: [], selected: null, busy: false };
+
+const $ = (id) => document.getElementById(id);
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+function when(seconds) {
+  return new Date(seconds * 1000).toLocaleString('zh-TW', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function current() {
+  return state.providers.find((p) => p.id === state.selected) || state.providers[0] || null;
+}
+
+// ---- toasts ----
+
+function toast(text, kind = 'ok') {
+  const el = document.createElement('div');
+  el.className = `toast ${kind}`;
+  el.innerHTML = `<span class="selectable">${esc(text)}</span><button type="button" aria-label="關閉">×</button>`;
+  const close = () => el.remove();
+  el.querySelector('button').addEventListener('click', close);
+  $('toasts').append(el);
+  setTimeout(close, kind === 'ok' ? 6000 : 14000);
+}
+
+function report(outcome) {
+  (outcome.warnings || []).forEach((w) => toast(w, 'warn'));
+  toast(outcome.message, 'ok');
+}
+
+// ---- dialog ----
+
+// Shows a modal with optional text fields. Resolves to the field values, or
+// null when cancelled. `validate` may return an error string to keep it open.
+function ask({ title, body = '', fields = [], ok = '確定', danger = false, validate }) {
+  const dialog = $('dialog');
+  $('dialog-title').textContent = title;
+  $('dialog-body').textContent = body;
+  $('dialog-body').hidden = !body;
+  $('dialog-error').hidden = true;
+  $('dialog-fields').innerHTML = fields.map((f) => `
+    <label>${esc(f.label)}
+      <input name="${esc(f.key)}" value="${esc(f.value || '')}" placeholder="${esc(f.placeholder || '')}"
+        autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    </label>`).join('');
+  const okButton = $('dialog-ok');
+  okButton.textContent = ok;
+  okButton.className = danger ? 'danger' : 'primary';
+
+  return new Promise((resolve) => {
+    const form = $('dialog-form');
+    const finish = (value) => {
+      form.removeEventListener('submit', onSubmit);
+      $('dialog-cancel').removeEventListener('click', onCancel);
+      dialog.removeEventListener('cancel', onCancel);
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    const onCancel = (event) => {
+      event.preventDefault();
+      finish(null);
+    };
+    const onSubmit = (event) => {
+      event.preventDefault();
+      const values = Object.fromEntries(new FormData(form).entries());
+      const problem = validate ? validate(values) : null;
+      if (problem) {
+        $('dialog-error').textContent = problem;
+        $('dialog-error').hidden = false;
+        return;
+      }
+      finish(values);
+    };
+    form.addEventListener('submit', onSubmit);
+    $('dialog-fields').oninput = () => { $('dialog-error').hidden = true; };
+    $('dialog-cancel').addEventListener('click', onCancel);
+    dialog.addEventListener('cancel', onCancel);
+    dialog.showModal();
+    const first = dialog.querySelector('input');
+    if (first) {
+      first.focus();
+      first.select();
+    }
+  });
+}
+
+const NAME_RULE = /^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$/;
+
+function checkName(values) {
+  const name = (values.name || '').trim();
+  if (!name) return '請輸入帳號名稱。';
+  if (!NAME_RULE.test(name)) return '名稱只能用英數字與 . _ - @ +，並以英數字開頭。';
+  return null;
+}
+
+// ---- drawing ----
+
+function providerSummary(p) {
+  if (p.logged_in && p.active && p.matches_active) return { dot: 'ok', text: p.active };
+  if (p.logged_in && p.active) return { dot: 'warn', text: '登入與帳號不一致' };
+  if (p.logged_in) return { dot: 'warn', text: '已登入，尚未儲存' };
+  if (p.accounts.length) return { dot: '', text: '未登入' };
+  return { dot: '', text: p.cli_installed ? '未登入' : '未安裝' };
+}
+
+function drawSidebar() {
+  const selected = current();
+  $('providers').innerHTML = state.providers.map((p) => {
+    const summary = providerSummary(p);
+    return `
+      <button type="button" class="provider" data-provider="${esc(p.id)}"
+        aria-current="${selected && selected.id === p.id}">
+        <span class="dot ${summary.dot}"></span>
+        <span class="label"><b>${esc(p.name)}</b><span>${esc(summary.text)}</span></span>
+        <span class="count" title="已儲存的帳號數">${p.accounts.length}</span>
+      </button>`;
+  }).join('');
+}
+
+function drawLive(p) {
+  const identity = esc(p.live_identity || '已登入');
+  if (!p.logged_in) {
+    const how = p.login_command ? `，或在終端機執行 <code>${esc(p.login_command)}</code>` : '';
+    return `
+      <section class="card live">
+        <div class="who">
+          <div class="eyebrow">目前登入</div>
+          <div class="identity">尚未登入</div>
+          <div class="hint">按「登入新帳號」開始${how}。</div>
+        </div>
+      </section>`;
+  }
+  if (p.active && p.matches_active) {
+    return `
+      <section class="card live">
+        <div class="who">
+          <div class="eyebrow">目前登入</div>
+          <div class="identity selectable">${identity}</div>
+          <div class="hint">使用中的帳號：${esc(p.active)}</div>
+        </div>
+      </section>`;
+  }
+  const hint = p.active
+    ? `這個登入和使用中的帳號「${esc(p.active)}」不是同一個身分。切換帳號前，建議先把它存成另一個帳號。`
+    : '這個登入還沒有存成帳號，存起來之後才能在帳號之間切換。';
+  return `
+    <section class="card live warn">
+      <div class="who">
+        <div class="eyebrow">目前登入</div>
+        <div class="identity selectable">${identity}</div>
+        <div class="hint">${hint}</div>
+      </div>
+      <button type="button" class="primary" data-action="save">儲存為帳號…</button>
+    </section>`;
+}
+
+function drawAccounts(p) {
+  if (!p.accounts.length) {
+    return '<div class="card none">還沒有儲存任何帳號。</div>';
+  }
+  const rows = p.accounts.map((a) => {
+    const meta = [a.identity, a.note, `存於 ${when(a.updated_at)}`].filter(Boolean).map(esc).join(' · ');
+    const badge = a.active
+      ? (p.matches_active
+        ? '<span class="chip ok">使用中</span>'
+        : '<span class="chip warn">使用中（登入不一致）</span>')
+      : '';
+    const reapply = a.active && !p.matches_active;
+    const switchButton = a.active && !reapply
+      ? ''
+      : `<button type="button" class="${reapply ? 'secondary' : 'primary'}" data-action="switch" data-name="${esc(a.name)}"
+          ${reapply ? 'data-force="1"' : ''}>${reapply ? '重新套用' : '切換'}</button>`;
+    return `
+      <div class="account ${a.active ? 'active' : ''}">
+        <div>
+          <div class="title"><span class="selectable">${esc(a.name)}</span>${badge}</div>
+          <div class="meta">${meta}</div>
+        </div>
+        <div class="actions">
+          ${switchButton}
+          <button type="button" class="ghost" data-action="rename" data-name="${esc(a.name)}">改名</button>
+          <button type="button" class="ghost" data-action="remove" data-name="${esc(a.name)}">刪除</button>
+        </div>
+      </div>`;
+  }).join('');
+  return `<div class="card accounts">${rows}</div>`;
+}
+
+function drawMain() {
+  const p = current();
+  if (!p) {
+    $('main').innerHTML = '<p class="empty">沒有可用的 provider。</p>';
+    return;
+  }
+  const cliChip = p.cli_installed
+    ? '<span class="chip ok">CLI 已安裝</span>'
+    : `<span class="chip warn">找不到 ${esc(p.cli || 'CLI')} 指令</span>`;
+  const customChip = p.builtin ? '' : '<span class="chip">自訂</span>';
+  const canSave = p.logged_in;
+  const canLogin = p.cli_installed && p.login_command;
+  const canSync = p.logged_in && p.active;
+  const locations = p.artifacts.map((a) => `
+    <li>
+      <span class="state ${a.present ? 'present' : ''}">${a.present ? '存在' : '不存在'}</span>
+      <span class="mono selectable">${esc(a.location)}</span>
+    </li>`).join('');
+
+  $('main').innerHTML = `
+    <header class="head">
+      <h1>${esc(p.name)}</h1>
+      ${cliChip}${customChip}
+    </header>
+    ${drawLive(p)}
+    <div class="toolbar">
+      <button type="button" class="secondary" data-action="login" ${canLogin ? '' : 'disabled'}
+        title="${canLogin ? '在終端機視窗執行登入流程，完成後自動存成帳號' : '需要先安裝這個 CLI'}">登入新帳號…</button>
+      <button type="button" class="secondary" data-action="save" ${canSave ? '' : 'disabled'}>儲存目前登入…</button>
+      <button type="button" class="secondary" data-action="next" ${p.accounts.length > 1 ? '' : 'disabled'}>切換到下一個</button>
+      <button type="button" class="ghost" data-action="sync" ${canSync ? '' : 'disabled'}
+        title="把目前登入（含更新過的憑證）存回使用中的帳號">更新存檔</button>
+      <button type="button" class="ghost" data-action="restore"
+        title="把登入還原成上一次切換之前的狀態">還原上次切換前</button>
+    </div>
+    <h2 class="section">已儲存的帳號</h2>
+    ${drawAccounts(p)}
+    <details class="locations">
+      <summary>AIOM 為 ${esc(p.name)} 管理的憑證位置</summary>
+      <ul class="card">${locations}</ul>
+    </details>`;
+}
+
+function draw() {
+  drawSidebar();
+  drawMain();
+}
+
+// ---- actions ----
+
+async function refresh({ quiet = false } = {}) {
+  try {
+    const result = await call('overview');
+    state.providers = result.providers;
+    (result.warnings || []).forEach((w) => toast(w, 'warn'));
+    (result.notices || []).forEach((n) => toast(n, 'ok'));
+    if (!state.selected || !state.providers.some((p) => p.id === state.selected)) {
+      const preferred = state.providers.find((p) => p.logged_in || p.accounts.length);
+      state.selected = (preferred || state.providers[0] || {}).id || null;
+    }
+    // Keep an open "locations" section open across redraws.
+    const open = Boolean(document.querySelector('details.locations[open]'));
+    draw();
+    if (open) document.querySelector('details.locations')?.setAttribute('open', '');
+    announceReady(`ok: ${state.providers.length} providers | ${$('main').innerText.replace(/\s+/g, ' ').slice(0, 400)}`);
+  } catch (error) {
+    if (!quiet) toast(String(error), 'error');
+    announceReady(`error: ${error}`);
+  }
+}
+
+// Tell the backend once what the first render looked like. It ignores this
+// unless the app was started in self-test mode.
+let announced = false;
+function announceReady(summary) {
+  if (announced) return;
+  announced = true;
+  call('ui_ready', { summary }).catch(() => {});
+}
+
+async function perform(command, args) {
+  if (state.busy) return;
+  state.busy = true;
+  document.body.style.cursor = 'progress';
+  try {
+    report(await call(command, args));
+  } catch (error) {
+    toast(String(error), 'error');
+  } finally {
+    state.busy = false;
+    document.body.style.cursor = '';
+    await refresh();
+  }
+}
+
+function suggestName(p) {
+  const local = (p.live_identity || '').split('@')[0].replace(/[^A-Za-z0-9._+-]/g, '');
+  return NAME_RULE.test(local) ? local : '';
+}
+
+const actions = {
+  async save(p) {
+    const values = await ask({
+      title: `儲存目前的 ${p.name} 登入`,
+      body: p.live_identity ? `目前登入：${p.live_identity}` : '',
+      fields: [
+        { key: 'name', label: '帳號名稱', value: suggestName(p), placeholder: '例如 work 或 personal' },
+        { key: 'note', label: '備註（選填）', placeholder: '例如 公司帳號' },
+      ],
+      ok: '儲存',
+      validate: checkName,
+    });
+    if (!values) return;
+    const name = values.name.trim();
+    let force = false;
+    if (p.accounts.some((a) => a.name === name)) {
+      const overwrite = await ask({
+        title: `覆寫帳號「${name}」？`,
+        body: '已經有同名的帳號，它的存檔會被目前的登入取代。',
+        ok: '覆寫',
+        danger: true,
+      });
+      if (!overwrite) return;
+      force = true;
+    }
+    await perform('save_login', { provider: p.id, name, note: values.note || null, force });
+  },
+
+  async login(p) {
+    const values = await ask({
+      title: `登入 ${p.name} 的新帳號`,
+      body: `會開啟終端機視窗執行「${p.login_command}」。目前的登入會先備份，登入成功後新帳號會自動存檔；沒完成的話會還原。`,
+      fields: [{ key: 'name', label: '新帳號的名稱', placeholder: '例如 personal' }],
+      ok: '開始登入',
+      validate: (v) => checkName(v)
+        || (p.accounts.some((a) => a.name === v.name.trim()) ? '已經有同名的帳號，請換一個名稱。' : null),
+    });
+    if (!values) return;
+    await perform('start_login', { provider: p.id, name: values.name.trim(), force: false });
+  },
+
+  async switch(p, { name, force }) {
+    await perform('switch_account', { provider: p.id, name, force: Boolean(force) });
+  },
+
+  async next(p) {
+    await perform('next_account', { provider: p.id });
+  },
+
+  async sync(p) {
+    await perform('sync_account', { provider: p.id, force: false });
+  },
+
+  async rename(p, { name }) {
+    const values = await ask({
+      title: `將「${name}」改名`,
+      fields: [{ key: 'name', label: '新的名稱', value: name }],
+      ok: '改名',
+      validate: (v) => checkName(v)
+        || (v.name.trim() !== name && p.accounts.some((a) => a.name === v.name.trim()) ? '已經有同名的帳號。' : null),
+    });
+    if (!values || values.name.trim() === name) return;
+    await perform('rename_account', { provider: p.id, from: name, to: values.name.trim() });
+  },
+
+  async remove(p, { name }) {
+    const sure = await ask({
+      title: `刪除帳號「${name}」？`,
+      body: '只會刪除 AIOM 裡的存檔，不會登出目前的登入。刪除後無法復原。',
+      ok: '刪除',
+      danger: true,
+    });
+    if (sure) await perform('remove_account', { provider: p.id, name });
+  },
+
+  async restore(p) {
+    const sure = await ask({
+      title: `還原 ${p.name} 的登入？`,
+      body: '登入會回到上一次切換之前的狀態，之後不會有使用中的帳號。',
+      ok: '還原',
+    });
+    if (sure) await perform('restore_login', { provider: p.id });
+  },
+};
+
+document.addEventListener('click', (event) => {
+  const providerButton = event.target.closest('[data-provider]');
+  if (providerButton) {
+    state.selected = providerButton.dataset.provider;
+    draw();
+    return;
+  }
+  const actionButton = event.target.closest('[data-action]');
+  if (!actionButton || actionButton.disabled) return;
+  const p = current();
+  const action = actions[actionButton.dataset.action];
+  if (p && action) action(p, actionButton.dataset);
+});
+
+$('refresh').addEventListener('click', () => refresh());
+
+// Logins and switches also happen outside the app (in a terminal), so look
+// again whenever the window comes back to the front.
+window.addEventListener('focus', () => {
+  if (!state.busy && !$('dialog').open) refresh({ quiet: true });
+});
+
+refresh();

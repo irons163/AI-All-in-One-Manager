@@ -1,0 +1,5 @@
+/target
+/dist
+/app/gen
+.claude/settings.local.json
+.DS_Store
