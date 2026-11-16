@@ -133,12 +133,15 @@ function drawLive(p) {
   const identity = esc(p.live_identity || '已登入');
   if (!p.logged_in) {
     const how = p.login_command ? `，或在終端機執行 <code>${esc(p.login_command)}</code>` : '';
+    const hint = p.cli_installed
+      ? `按「登入新帳號」開始${how}。`
+      : `這台電腦還沒有安裝 ${esc(p.name)} 的命令列工具，安裝後就能在這裡登入與管理帳號。`;
     return `
       <section class="card live">
         <div class="who">
           <div class="eyebrow">目前登入</div>
           <div class="identity">尚未登入</div>
-          <div class="hint">按「登入新帳號」開始${how}。</div>
+          <div class="hint">${hint}</div>
         </div>
       </section>`;
   }
@@ -198,6 +201,40 @@ function drawAccounts(p) {
   return `<div class="card accounts">${rows}</div>`;
 }
 
+// Things worth knowing about one provider that the backend cannot tell.
+const PROVIDER_NOTES = {
+  claude: 'Claude 桌面 App 的登入是另外一回事，這裡管理的是 Claude Code 命令列工具（claude 指令）的登入。',
+};
+
+// Why each unavailable button is unavailable, in the order the buttons appear.
+// A greyed-out button with no explanation just looks broken.
+function disabledReasons(p) {
+  const reasons = [];
+  if (!p.cli_installed) {
+    const install = p.install
+      ? `在終端機執行 <code class="selectable">${esc(p.install)}</code> 安裝`
+      : `依 ${esc(p.name)} 的官方說明安裝`;
+    reasons.push(`<b>登入新帳號</b>：找不到 <code>${esc(p.cli || 'CLI')}</code> 指令。${install}，然後按左下角的「重新整理」。`);
+  } else if (!p.login_command) {
+    reasons.push('<b>登入新帳號</b>：這個 provider 沒有設定登入指令。');
+  }
+  if (!p.logged_in) {
+    reasons.push('<b>儲存目前登入、更新存檔</b>：目前沒有登入，沒有東西可以儲存。');
+  } else if (!p.active) {
+    reasons.push('<b>更新存檔</b>：目前的登入還沒有對應的帳號。');
+  }
+  if (p.accounts.length < 2) {
+    reasons.push(`<b>切換到下一個</b>：要有兩個以上已儲存的帳號（目前 ${p.accounts.length} 個）。`);
+  }
+  if (!p.has_backup) {
+    reasons.push('<b>還原上次切換前</b>：還沒有切換過，沒有可還原的備份。');
+  }
+  if (!p.cli_installed && PROVIDER_NOTES[p.id]) {
+    reasons.push(esc(PROVIDER_NOTES[p.id]));
+  }
+  return reasons;
+}
+
 function drawMain() {
   const p = current();
   if (!p) {
@@ -211,6 +248,7 @@ function drawMain() {
   const canSave = p.logged_in;
   const canLogin = p.cli_installed && p.login_command;
   const canSync = p.logged_in && p.active;
+  const reasons = disabledReasons(p);
   const locations = p.artifacts.map((a) => `
     <li>
       <span class="state ${a.present ? 'present' : ''}">${a.present ? '存在' : '不存在'}</span>
@@ -230,9 +268,14 @@ function drawMain() {
       <button type="button" class="secondary" data-action="next" ${p.accounts.length > 1 ? '' : 'disabled'}>切換到下一個</button>
       <button type="button" class="ghost" data-action="sync" ${canSync ? '' : 'disabled'}
         title="把目前登入（含更新過的憑證）存回使用中的帳號">更新存檔</button>
-      <button type="button" class="ghost" data-action="restore"
+      <button type="button" class="ghost" data-action="restore" ${p.has_backup ? '' : 'disabled'}
         title="把登入還原成上一次切換之前的狀態">還原上次切換前</button>
     </div>
+    ${reasons.length ? `
+    <aside class="why">
+      <h2>為什麼有些按鈕不能按</h2>
+      <ul>${reasons.map((r) => `<li>${r}</li>`).join('')}</ul>
+    </aside>` : ''}
     <h2 class="section">已儲存的帳號</h2>
     ${drawAccounts(p)}
     <details class="locations">
@@ -262,7 +305,10 @@ async function refresh({ quiet = false } = {}) {
     const open = Boolean(document.querySelector('details.locations[open]'));
     draw();
     if (open) document.querySelector('details.locations')?.setAttribute('open', '');
-    announceReady(`ok: ${state.providers.length} providers | ${$('main').innerText.replace(/\s+/g, ' ').slice(0, 400)}`);
+    const unavailable = state.providers
+      .map((p) => `${p.id}=${disabledReasons(p).length}${p.install ? '' : '(no install hint)'}`)
+      .join(' ');
+    announceReady(`ok: ${state.providers.length} providers | unavailable-button notes: ${unavailable} | ${$('main').innerText.replace(/\s+/g, ' ').slice(0, 300)}`);
   } catch (error) {
     if (!quiet) toast(String(error), 'error');
     announceReady(`error: ${error}`);

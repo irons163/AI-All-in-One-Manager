@@ -137,6 +137,10 @@ struct ProviderView {
     accounts: Vec<AccountView>,
     artifacts: Vec<ArtifactView>,
     login_command: Option<String>,
+    /// Shell command that installs the CLI, when one is known.
+    install: Option<String>,
+    /// Whether "restore" has anything to put back.
+    has_backup: bool,
 }
 
 #[derive(Serialize, Default)]
@@ -188,6 +192,8 @@ fn provider_view(ctx: &Ctx, p: &Provider) -> Result<ProviderView> {
             })
             .collect(),
         login_command: p.login.as_ref().map(|cmd| cmd.join(" ")),
+        install: p.install.clone(),
+        has_backup: ops::has_backup(ctx, p),
     })
 }
 

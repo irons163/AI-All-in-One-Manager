@@ -22,6 +22,7 @@
         { location: '~/.claude.json [oauthAccount]', primary: false, present: true },
       ],
       login_command: 'claude auth login',
+      install: 'npm install -g @anthropic-ai/claude-code', has_backup: true,
     },
     {
       id: 'codex', name: 'Codex CLI', builtin: true, cli: 'codex', cli_installed: true,
@@ -29,6 +30,7 @@
       accounts: [],
       artifacts: [{ location: '~/.codex/auth.json', primary: true, present: true }],
       login_command: 'codex login',
+      install: 'npm install -g @openai/codex', has_backup: false,
     },
     {
       id: 'gemini', name: 'Gemini CLI', builtin: true, cli: 'gemini', cli_installed: true,
@@ -41,6 +43,7 @@
         { location: '~/.gemini/settings.json [security.auth, selectedAuthType]', primary: false, present: true },
       ],
       login_command: 'gemini',
+      install: 'npm install -g @google/gemini-cli', has_backup: true,
     },
     {
       id: 'grok', name: 'Grok CLI', builtin: true, cli: 'grok', cli_installed: false,
@@ -48,6 +51,7 @@
       accounts: [],
       artifacts: [{ location: '~/.grok/auth.json', primary: true, present: false }],
       login_command: 'grok login',
+      install: null, has_backup: false,
     },
     {
       id: 'opencode', name: 'OpenCode', builtin: true, cli: 'opencode', cli_installed: true,
@@ -55,6 +59,7 @@
       accounts: [account('max', null, 'Claude Max', 86400), account('api', null, 'API key', 86400 * 9)],
       artifacts: [{ location: '~/.local/share/opencode/auth.json', primary: true, present: false }],
       login_command: 'opencode auth login',
+      install: 'npm install -g opencode-ai', has_backup: true,
     },
   ];
 

@@ -191,6 +191,11 @@ fn backup_dirs(ctx: &Ctx, p: &Provider) -> Vec<String> {
     names
 }
 
+/// Whether there is a backup that `restore` could put back.
+pub fn has_backup(ctx: &Ctx, p: &Provider) -> bool {
+    !backup_dirs(ctx, p).is_empty()
+}
+
 fn prune_backups(ctx: &Ctx, p: &Provider) {
     let names = backup_dirs(ctx, p);
     if names.len() > KEEP_BACKUPS {

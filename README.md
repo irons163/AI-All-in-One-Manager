@@ -32,6 +32,9 @@ App 的畫面：
 - **登入新帳號…**：開啟終端機視窗執行該 CLI 自己的登入流程（例如 `codex login`），成功後自動存成新帳號，沒完成則還原原本的登入。
 - **切換到下一個**、**更新存檔**、**還原上次切換前**：對應命令列的 `next`、`sync`、`restore`。
 - 視窗回到前景時會自動重新整理，所以在終端機做的變更也會反映出來。
+- 有按鈕不能按時，工具列下方會列出每個按鈕停用的原因。最常見的是該 CLI 還沒安裝，這時會一併顯示安裝指令。
+
+注意：AIOM 管理的是各家**命令列工具**的登入。Claude 桌面 App 自己的登入是分開的，要管理 Claude 的帳號需要另外安裝 Claude Code CLI（`claude` 指令）。
 
 App 從 Finder 啟動時會向登入 shell 詢問 `PATH`，因此裝在 `~/.local/bin`、Homebrew、npm、cargo 等位置的 CLI 都找得到。
 
@@ -127,6 +130,7 @@ id = "qwen"
 name = "Qwen Code"
 binary = "qwen"              # 用來判斷 CLI 是否已安裝
 login = ["qwen"]             # aiom login 要執行的指令
+install = "npm install -g @qwen-code/qwen-code"   # 選填：CLI 未安裝時，App 會顯示這個安裝指令
 
 [[provider.artifact]]
 type = "file"                # 整個檔案都屬於登入狀態

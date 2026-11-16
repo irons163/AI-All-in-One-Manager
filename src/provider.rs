@@ -21,6 +21,8 @@ pub struct Provider {
     pub binary: Option<String>,
     /// Command that starts the CLI's own login flow.
     pub login: Option<Vec<String>>,
+    /// Shell command that installs the CLI, shown when it is missing.
+    pub install: Option<String>,
     pub artifacts: Vec<Artifact>,
     /// Tried in order; the first that yields a value names the live account.
     pub identity: Vec<IdentitySource>,
@@ -133,6 +135,7 @@ fn claude(ctx: &Ctx) -> Provider {
         name: "Claude Code".into(),
         binary: Some("claude".into()),
         login: command(&["claude", "auth", "login"]),
+        install: Some("npm install -g @anthropic-ai/claude-code".into()),
         artifacts,
         identity: vec![json_string(&state_file, "oauthAccount.emailAddress")],
         builtin: true,
@@ -148,6 +151,7 @@ fn codex(ctx: &Ctx) -> Provider {
         name: "Codex CLI".into(),
         binary: Some("codex".into()),
         login: command(&["codex", "login"]),
+        install: Some("npm install -g @openai/codex".into()),
         artifacts: vec![Artifact::file("auth.json", auth.clone(), true)],
         identity: vec![
             json_string(&auth, "email"),
@@ -193,6 +197,7 @@ fn gemini(ctx: &Ctx) -> Provider {
         name: "Gemini CLI".into(),
         binary: Some("gemini".into()),
         login: command(&["gemini"]),
+        install: Some("npm install -g @google/gemini-cli".into()),
         artifacts,
         identity: vec![json_string(&accounts, "active")],
         builtin: true,
@@ -208,6 +213,7 @@ fn grok(ctx: &Ctx) -> Provider {
         name: "Grok CLI".into(),
         binary: Some("grok".into()),
         login: command(&["grok", "login"]),
+        install: None,
         artifacts: vec![Artifact::file("auth.json", auth.clone(), true)],
         identity: vec![
             json_string(&auth, "email"),
@@ -229,6 +235,7 @@ fn opencode(ctx: &Ctx) -> Provider {
         name: "OpenCode".into(),
         binary: Some("opencode".into()),
         login: command(&["opencode", "auth", "login"]),
+        install: Some("npm install -g opencode-ai".into()),
         artifacts: vec![Artifact::file(
             "auth.json",
             data.join("opencode").join("auth.json"),
@@ -259,6 +266,7 @@ struct CustomProvider {
     name: Option<String>,
     binary: Option<String>,
     login: Option<Vec<String>>,
+    install: Option<String>,
     #[serde(default)]
     artifact: Vec<CustomArtifact>,
     #[serde(default)]
@@ -418,6 +426,7 @@ fn build_custom(ctx: &Ctx, raw: CustomProvider) -> Result<Provider> {
         id: raw.id,
         binary: raw.binary,
         login: raw.login.filter(|cmd| !cmd.is_empty()),
+        install: raw.install.filter(|cmd| !cmd.trim().is_empty()),
         artifacts,
         identity,
         builtin: false,
