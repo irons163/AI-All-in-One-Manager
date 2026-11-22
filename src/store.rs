@@ -28,12 +28,22 @@ pub struct Meta {
     /// Who the snapshot belongs to (usually an email), when the provider says.
     #[serde(default)]
     pub identity: Option<String>,
+    /// A friendlier name to show for that identity (an email), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
     /// Ids of the artifacts that were present when the snapshot was taken.
     /// Artifacts not listed here are removed from the live login on switch.
     #[serde(default)]
     pub artifacts: Vec<String>,
+}
+
+impl Meta {
+    /// What to show for this account's owner: the label if known, else the identity.
+    pub fn shown(&self) -> Option<&str> {
+        self.label.as_deref().or(self.identity.as_deref())
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -204,6 +214,7 @@ mod tests {
             created_at: 1,
             updated_at: 2,
             identity: Some("a@b.c".into()),
+            label: None,
             note: None,
             artifacts: vec!["auth.json".into()],
         };

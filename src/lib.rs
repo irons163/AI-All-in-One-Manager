@@ -8,6 +8,7 @@
 
 pub mod apps;
 pub mod artifact;
+pub mod chromium;
 pub mod cli;
 pub mod ctx;
 pub mod ops;

@@ -311,6 +311,9 @@ fn sync_back(
     if live_id.is_some() {
         meta.identity = live_id;
     }
+    if let Some(label) = p.live_label() {
+        meta.label = Some(label);
+    }
     store::save_meta(ctx, &meta)?;
     Ok(true)
 }
@@ -354,6 +357,9 @@ pub fn save(
         created_at: existing.as_ref().map(|m| m.created_at).unwrap_or(now),
         updated_at: now,
         identity: p.live_identity(),
+        label: p
+            .live_label()
+            .or_else(|| existing.as_ref().and_then(|m| m.label.clone())),
         note: note.or_else(|| existing.and_then(|m| m.note)),
         artifacts,
     };
@@ -366,6 +372,7 @@ pub fn save(
 pub struct Adopted {
     pub name: String,
     pub identity: Option<String>,
+    pub label: Option<String>,
     /// `true` when a new account was created, `false` when the live login
     /// turned out to be an account that was already saved.
     pub created: bool,
@@ -427,8 +434,14 @@ pub fn adopt(ctx: &Ctx, p: &Provider) -> Result<Option<Adopted>> {
     }
     let live_id = p.live_identity();
     if let Some(name) = store::active(ctx, &p.id)? {
-        if let Some(meta) = store::load_meta(ctx, &p.id, &name)? {
+        if let Some(mut meta) = store::load_meta(ctx, &p.id, &name)? {
             if compatible(&live_id, &meta.identity) {
+                // Nothing to save, but an account saved before its label was
+                // readable can learn it now. Metadata only; no credentials.
+                if let Some(label) = p.live_label().filter(|l| meta.label.as_ref() != Some(l)) {
+                    meta.label = Some(label);
+                    store::save_meta(ctx, &meta)?;
+                }
                 return Ok(None);
             }
         }
@@ -455,11 +468,15 @@ pub fn adopt(ctx: &Ctx, p: &Provider) -> Result<Option<Adopted>> {
     if let Some(mut meta) = existing {
         meta.artifacts = write_snapshot(ctx, p, &store::profile_loc(ctx, &p.id, &meta.name), &live)?;
         meta.updated_at = now_secs();
+        if let Some(label) = p.live_label() {
+            meta.label = Some(label);
+        }
         store::save_meta(ctx, &meta)?;
         store::set_active(ctx, &p.id, Some(&meta.name))?;
         return Ok(Some(Adopted {
             name: meta.name,
             identity: meta.identity,
+            label: meta.label,
             created: false,
         }));
     }
@@ -470,7 +487,10 @@ pub fn adopt(ctx: &Ctx, p: &Provider) -> Result<Option<Adopted>> {
         .get(&p.id)
         .filter(|n| store::validate_name(n).is_ok() && !accounts.iter().any(|m| &m.name == *n))
         .cloned();
-    let name = pending.unwrap_or_else(|| fresh_name(&accounts, live_id.as_deref()));
+    let label = p.live_label();
+    let name = pending.unwrap_or_else(|| {
+        fresh_name(&accounts, label.as_deref().or(live_id.as_deref()))
+    });
     let meta = save(ctx, p, &name, false, None)?;
     if state.pending.contains_key(&p.id) {
         store::set_pending(ctx, &p.id, None)?;
@@ -478,6 +498,7 @@ pub fn adopt(ctx: &Ctx, p: &Provider) -> Result<Option<Adopted>> {
     Ok(Some(Adopted {
         name: meta.name,
         identity: meta.identity,
+        label: meta.label,
         created: true,
     }))
 }
@@ -487,6 +508,8 @@ pub struct SwitchReport {
     pub from: Option<String>,
     pub to: String,
     pub identity: Option<String>,
+    /// Friendlier name for the target account (an email), when known.
+    pub label: Option<String>,
     /// Nothing was changed because the account was already active.
     pub already_active: bool,
     /// The previous account's snapshot was refreshed from the live login.
@@ -511,6 +534,7 @@ pub fn switch(ctx: &Ctx, p: &Provider, name: &str, force: bool) -> Result<Switch
         from: active.clone(),
         to: name.to_string(),
         identity: target.identity.clone(),
+        label: target.label.clone(),
         ..SwitchReport::default()
     };
 
@@ -611,8 +635,36 @@ pub fn sync(ctx: &Ctx, p: &Provider, force: bool) -> Result<Meta> {
     if live_id.is_some() {
         meta.identity = live_id;
     }
+    if let Some(label) = p.live_label() {
+        meta.label = Some(label);
+    }
     store::save_meta(ctx, &meta)?;
     Ok(meta)
+}
+
+/// For an account saved without a label, read the label from its saved
+/// snapshot and record it. Only the account's metadata is written; the
+/// credentials are read in memory. Returns the label if one was found.
+pub fn backfill_label(ctx: &Ctx, p: &Provider, name: &str) -> Result<Option<String>> {
+    let Some(mut meta) = store::load_meta(ctx, &p.id, name)? else {
+        return Ok(None);
+    };
+    if meta.label.is_some() || p.label.is_empty() {
+        return Ok(meta.label);
+    }
+    let Some(identity) = meta.identity.clone() else {
+        return Ok(None);
+    };
+    let loc = store::profile_loc(ctx, &p.id, name);
+    let label = p.saved_label(&identity, |id| {
+        let art = p.artifacts.iter().find(|a| a.id == id)?;
+        snap_get(ctx, &loc, art).ok().flatten()
+    });
+    if let Some(label) = &label {
+        meta.label = Some(label.clone());
+        store::save_meta(ctx, &meta)?;
+    }
+    Ok(label)
 }
 
 /// Delete a saved account. The live login is not touched.
@@ -783,6 +835,8 @@ pub struct Status {
     pub binary: Option<PathBuf>,
     pub logged_in: bool,
     pub live_identity: Option<String>,
+    /// Friendlier name for the live account (an email), when known.
+    pub live_label: Option<String>,
     pub active: Option<Meta>,
     /// Whether the live login still belongs to the active account.
     pub matches_active: bool,
@@ -797,6 +851,7 @@ pub fn status(ctx: &Ctx, p: &Provider) -> Result<Status> {
     };
     let logged_in = p.logged_in(ctx);
     let live_identity = if logged_in { p.live_identity() } else { None };
+    let live_label = if logged_in { p.live_label() } else { None };
     let matches_active = match &active {
         Some(meta) => logged_in && compatible(&live_identity, &meta.identity),
         None => false,
@@ -805,6 +860,7 @@ pub fn status(ctx: &Ctx, p: &Provider) -> Result<Status> {
         binary: p.installed_path(ctx),
         logged_in,
         live_identity,
+        live_label,
         active,
         matches_active,
         accounts,

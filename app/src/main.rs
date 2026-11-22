@@ -110,6 +110,8 @@ fn run<T>(f: impl FnOnce(&Ctx, &[Provider]) -> Result<T>) -> Result<T, String> {
 struct AccountView {
     name: String,
     identity: Option<String>,
+    /// Friendlier name for the identity (an email), when known.
+    label: Option<String>,
     note: Option<String>,
     updated_at: u64,
     active: bool,
@@ -131,6 +133,8 @@ struct ProviderView {
     cli_installed: bool,
     logged_in: bool,
     live_identity: Option<String>,
+    /// Friendlier name for the live account (an email), when known.
+    live_label: Option<String>,
     active: Option<String>,
     /// Whether the live login still belongs to the active account.
     matches_active: bool,
@@ -173,6 +177,7 @@ fn provider_view(ctx: &Ctx, p: &Provider) -> Result<ProviderView> {
         cli_installed: st.binary.is_some(),
         logged_in: st.logged_in,
         live_identity: st.live_identity,
+        live_label: st.live_label,
         matches_active: st.matches_active,
         accounts: st
             .accounts
@@ -180,6 +185,7 @@ fn provider_view(ctx: &Ctx, p: &Provider) -> Result<ProviderView> {
             .map(|m| AccountView {
                 name: m.name.clone(),
                 identity: m.identity.clone(),
+                label: m.label.clone(),
                 note: m.note.clone(),
                 updated_at: m.updated_at,
                 active: active.as_deref() == Some(m.name.as_str()),
@@ -215,7 +221,7 @@ fn identity_suffix(identity: &Option<String>) -> String {
 }
 
 fn switch_outcome(ctx: &Ctx, p: &Provider, report: ops::SwitchReport) -> Outcome {
-    let who = identity_suffix(&report.identity);
+    let who = identity_suffix(&report.label.clone().or_else(|| report.identity.clone()));
     let message = if report.already_active {
         format!("{} 已經在使用「{}」{who}", p.name, report.to)
     } else {
@@ -247,6 +253,28 @@ struct Overview {
     warnings: Vec<String>,
 }
 
+/// Give saved accounts that have no email yet the one stored in their
+/// snapshot. Each account (as of its last save) is tried once per launch, so
+/// an account whose snapshot holds no readable email is not re-read on every
+/// refresh. Failures only mean the account keeps showing its id.
+fn backfill_labels(ctx: &Ctx, providers: &[Provider]) {
+    static TRIED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    for p in providers.iter().filter(|p| !p.label.is_empty()) {
+        let Ok(accounts) = store::list(ctx, &p.id) else { continue };
+        for meta in accounts.iter().filter(|m| m.label.is_none()) {
+            let key = format!("{}/{}/{}", p.id, meta.name, meta.updated_at);
+            {
+                let mut tried = TRIED.lock().unwrap_or_else(|e| e.into_inner());
+                if tried.contains(&key) {
+                    continue;
+                }
+                tried.push(key);
+            }
+            let _ = ops::backfill_label(ctx, p, &meta.name);
+        }
+    }
+}
+
 /// The state of every provider. Any live login that is not saved yet is saved
 /// on the way, so a login made in a terminal shows up as an account by itself.
 #[tauri::command(async)]
@@ -254,10 +282,11 @@ fn overview() -> Result<Overview, String> {
     run(|ctx, providers| {
         let mut notices = Vec::new();
         let mut warnings = Vec::new();
+        backfill_labels(ctx, providers);
         for p in providers {
             match ops::adopt(ctx, p) {
                 Ok(Some(adopted)) => {
-                    let who = identity_suffix(&adopted.identity);
+                    let who = identity_suffix(&adopted.label.clone().or_else(|| adopted.identity.clone()));
                     notices.push(if adopted.created {
                         format!(
                             "已自動將 {} 目前的登入儲存為帳號「{}」{who}",
@@ -304,7 +333,7 @@ fn save_login(
             "已將目前的 {} 登入儲存為「{}」{}",
             p.name,
             meta.name,
-            identity_suffix(&meta.identity)
+            identity_suffix(&meta.shown().map(str::to_string))
         )))
     })
 }

@@ -6,13 +6,14 @@
 //! declared (or a built-in overridden) in `<data dir>/providers.toml`.
 
 use crate::artifact::Artifact;
+use crate::chromium;
 use crate::ctx::Ctx;
 use crate::util::{json_get, jwt_claim};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct Provider {
@@ -29,7 +30,12 @@ pub struct Provider {
     pub app: Option<AppInfo>,
     pub artifacts: Vec<Artifact>,
     /// Tried in order; the first that yields a value names the live account.
+    /// Used to tell accounts apart, so it must be stable.
     pub identity: Vec<IdentitySource>,
+    /// Tried in order for a friendlier name to show (an email) when the
+    /// identity is an opaque id. Display only: it may be unavailable at
+    /// times, so it is never used to tell accounts apart.
+    pub label: Vec<IdentitySource>,
     pub builtin: bool,
 }
 
@@ -59,6 +65,14 @@ pub enum IdentitySource {
         key: String,
         label: String,
     },
+    /// The email that a Chromium IndexedDB cache stores next to an account
+    /// id, as the claude.ai web app does for its account object. The id is
+    /// read from `id_key` in the JSON file `id_path`.
+    CachedEmail {
+        dir: PathBuf,
+        id_path: PathBuf,
+        id_key: String,
+    },
 }
 
 impl IdentitySource {
@@ -67,6 +81,16 @@ impl IdentitySource {
             IdentitySource::JsonString { path, key }
             | IdentitySource::JwtClaim { path, key, .. }
             | IdentitySource::Present { path, key, .. } => (path, key),
+            IdentitySource::CachedEmail {
+                dir,
+                id_path,
+                id_key,
+            } => {
+                let root: Value =
+                    serde_json::from_str(&fs::read_to_string(id_path).ok()?).ok()?;
+                let id = json_get(&root, id_key)?.as_str()?.trim();
+                return cached_email(dir, id);
+            }
         };
         let root: Value = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
         let value = json_get(&root, key)?.as_str()?.trim();
@@ -77,14 +101,141 @@ impl IdentitySource {
             IdentitySource::JsonString { .. } => Some(value.to_string()),
             IdentitySource::JwtClaim { claim, .. } => jwt_claim(value, claim),
             IdentitySource::Present { label, .. } => Some(label.clone()),
+            IdentitySource::CachedEmail { .. } => unreachable!("returned above"),
         }
     }
+}
+
+/// Read a LEB128 varint, as V8 uses for string lengths.
+fn read_varint(bytes: &[u8], at: &mut usize) -> Option<usize> {
+    let mut value: usize = 0;
+    for shift in (0..35).step_by(7) {
+        let byte = *bytes.get(*at)?;
+        *at += 1;
+        value |= usize::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Read a V8 serialised one-byte string (tag `"`, varint length, bytes).
+fn read_v8_string<'a>(bytes: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
+    if *bytes.get(*at)? != b'"' {
+        return None;
+    }
+    *at += 1;
+    let len = read_varint(bytes, at)?;
+    let end = at.checked_add(len)?;
+    let text = bytes.get(*at..end)?;
+    *at = end;
+    Some(text)
+}
+
+/// Look for `uuid: <id>, email_address: <email>` in a Chromium IndexedDB
+/// folder, as the claude.ai web app caches its account object. Values there
+/// are V8-serialised and may be Snappy-compressed, inside LevelDB logs or
+/// tables, or moved into blob files; `chromium::readable_parts` undoes all
+/// that. Returns `None` when no such record can be read, and the caller then
+/// shows the account id instead.
+pub(crate) fn cached_email(dir: &Path, id: &str) -> Option<String> {
+    let needle = email_needle(id)?;
+    let mut files = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        for entry in fs::read_dir(&next).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    // Newest data first: LevelDB log files carry the latest writes, and
+    // higher file numbers are newer.
+    files.sort_by_key(|p| {
+        let is_log = p.extension().is_some_and(|e| e == "log");
+        (std::cmp::Reverse(is_log), std::cmp::Reverse(p.clone()))
+    });
+    files
+        .iter()
+        .flat_map(|file| chromium::readable_parts(file))
+        .find_map(|part| email_after(&part, &needle))
+}
+
+/// The V8 one-byte string encoding of an account id, as it appears just
+/// before `email_address` in the cached account object.
+fn email_needle(id: &str) -> Option<Vec<u8>> {
+    if id.is_empty() || id.len() > 127 {
+        return None;
+    }
+    let mut needle = vec![b'"', id.len() as u8];
+    needle.extend_from_slice(id.as_bytes());
+    Some(needle)
+}
+
+/// The plausible email in `email_address: "..."` right after `needle`.
+fn email_after(bytes: &[u8], needle: &[u8]) -> Option<String> {
+    let mut from = 0;
+    while let Some(pos) = chromium::find_bytes(&bytes[from..], needle) {
+        let mut at = from + pos + needle.len();
+        from += pos + 1;
+        if read_v8_string(bytes, &mut at) != Some(b"email_address".as_slice()) {
+            continue;
+        }
+        let Some(email) = read_v8_string(bytes, &mut at) else { continue };
+        let Ok(email) = std::str::from_utf8(email) else { continue };
+        let plausible = email.len() <= 254
+            && email.contains('@')
+            && !email.starts_with('@')
+            && !email.ends_with('@')
+            && email.bytes().all(|b| b.is_ascii_graphic());
+        if plausible {
+            return Some(email.to_string());
+        }
+    }
+    None
 }
 
 impl Provider {
     /// Who is logged in right now, if the provider's files say.
     pub fn live_identity(&self) -> Option<String> {
         self.identity.iter().find_map(IdentitySource::resolve)
+    }
+
+    /// A friendlier name for the live account (an email), when there is one.
+    pub fn live_label(&self) -> Option<String> {
+        self.label.iter().find_map(IdentitySource::resolve)
+    }
+
+    /// The same label, read from a saved account instead of the live files.
+    /// `snapshot` returns the saved content of an artifact by id; `identity`
+    /// is the saved account's identity.
+    pub fn saved_label(
+        &self,
+        identity: &str,
+        snapshot: impl Fn(&str) -> Option<Vec<u8>>,
+    ) -> Option<String> {
+        self.label.iter().find_map(|source| {
+            let IdentitySource::CachedEmail { dir, .. } = source else {
+                return None;
+            };
+            let artifact = self.artifacts.iter().find(|a| {
+                matches!(&a.kind, crate::artifact::Kind::Dir { path } if path == dir)
+            })?;
+            let packed = snapshot(&artifact.id)?;
+            let mut files = crate::artifact::packed_files(&packed)?;
+            files.sort_by_key(|(name, _)| {
+                (std::cmp::Reverse(name.ends_with(".log")), std::cmp::Reverse(name.clone()))
+            });
+            let needle = email_needle(identity)?;
+            files
+                .into_iter()
+                .flat_map(|(name, data)| chromium::readable_parts_of(&name, data.to_vec()))
+                .find_map(|part| email_after(&part, &needle))
+        })
     }
 
     /// Where the provider's CLI or app is installed, if it is.
@@ -167,6 +318,7 @@ fn claude(ctx: &Ctx) -> Provider {
         app: None,
         artifacts,
         identity: vec![json_string(&state_file, "oauthAccount.emailAddress")],
+        label: Vec::new(),
         builtin: true,
     }
 }
@@ -214,6 +366,11 @@ fn claude_desktop(ctx: &Ctx) -> Provider {
             Artifact::dir("webstorage", dir.join("WebStorage"), false),
         ],
         identity: vec![json_string(&config, "lastKnownAccountUuid")],
+        label: vec![IdentitySource::CachedEmail {
+            dir: dir.join("IndexedDB"),
+            id_path: config.clone(),
+            id_key: "lastKnownAccountUuid".into(),
+        }],
         builtin: true,
     }
 }
@@ -239,6 +396,7 @@ fn codex(ctx: &Ctx) -> Provider {
                 label: "API key".into(),
             },
         ],
+        label: Vec::new(),
         builtin: true,
     }
 }
@@ -278,6 +436,7 @@ fn gemini(ctx: &Ctx) -> Provider {
         app: None,
         artifacts,
         identity: vec![json_string(&accounts, "active")],
+        label: Vec::new(),
         builtin: true,
     }
 }
@@ -301,6 +460,7 @@ fn grok(ctx: &Ctx) -> Provider {
             jwt(&auth, "id_token", "email"),
             jwt(&auth, "tokens.id_token", "email"),
         ],
+        label: Vec::new(),
         builtin: true,
     }
 }
@@ -322,6 +482,7 @@ fn opencode(ctx: &Ctx) -> Provider {
             true,
         )],
         identity: Vec::new(),
+        label: Vec::new(),
         builtin: true,
     }
 }
@@ -545,6 +706,7 @@ fn build_custom(ctx: &Ctx, raw: CustomProvider) -> Result<Provider> {
         }),
         artifacts,
         identity,
+        label: Vec::new(),
         builtin: false,
     })
 }
@@ -649,6 +811,70 @@ mod tests {
             Kind::Keychain { service, account }
                 if service == "Claude Code-credentials" && account == "tester"
         ));
+    }
+
+    #[test]
+    fn reads_the_email_cached_next_to_an_account_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let idb = dir.path().join("https_claude.ai_0.indexeddb.leveldb");
+        fs::create_dir_all(&idb).unwrap();
+        let id = "09f01da4-8573-4be3-9c4f-42b5cf8c50da";
+        let other = "11111111-2222-4333-8444-555555555555";
+        let record = |uuid: &str, email: &str| {
+            let mut b = b"\x00\xffo\"\x04uuid\"".to_vec();
+            b.push(uuid.len() as u8);
+            b.extend_from_slice(uuid.as_bytes());
+            b.extend_from_slice(b"\"\x0demail_address\"");
+            b.push(email.len() as u8);
+            b.extend_from_slice(email.as_bytes());
+            b.extend_from_slice(b"\"\x09full_name\"\x04Phil");
+            b
+        };
+        let mut log = b"noise".to_vec();
+        log.extend(record(other, "someone@else.io"));
+        log.extend(record(id, "me@example.com"));
+        fs::write(idb.join("000004.log"), &log).unwrap();
+        fs::write(idb.join("000005.ldb"), b"\x8f\x01compressed garbage").unwrap();
+
+        assert_eq!(cached_email(dir.path(), id).as_deref(), Some("me@example.com"));
+        assert_eq!(cached_email(dir.path(), other).as_deref(), Some("someone@else.io"));
+        assert_eq!(cached_email(dir.path(), "not-there"), None);
+        assert_eq!(cached_email(dir.path(), ""), None);
+        assert_eq!(cached_email(&dir.path().join("missing"), id), None);
+
+        // A record cut off in the middle yields nothing rather than garbage.
+        let mut cut = record(id, "me@example.com");
+        cut.truncate(cut.len() - 25);
+        fs::write(idb.join("000004.log"), &cut).unwrap();
+        assert_eq!(cached_email(dir.path(), id), None);
+
+        // Blink compressed the value with Snappy ("mail" of "gmail" became a
+        // copy of the "mail" in "email_address"), and the LevelDB log split
+        // it across a block boundary.
+        let mut value = vec![b'x'; 40_000];
+        value.extend(record(id, "someone@gmail.com"));
+        let mail = find_bytes_in(&value, b"email_address") + 1;
+        let gmail = find_bytes_in(&value, b"gmail.com") + 1;
+        let packed = crate::chromium::tests::snappy_encode(&value, &[(gmail, 4, gmail - mail)]);
+        let mut stored = b"\xff\x11\x02".to_vec();
+        stored.extend(packed);
+        assert!(find_bytes_in_opt(&stored, b"gmail").is_none(), "not readable as-is");
+        let log = crate::chromium::tests::leveldb_log(&[b"other record", &stored]);
+        fs::write(idb.join("000004.log"), &log).unwrap();
+        assert_eq!(cached_email(dir.path(), id).as_deref(), Some("someone@gmail.com"));
+
+        // After compaction the same value sits in a Snappy-compressed table.
+        fs::remove_file(idb.join("000004.log")).unwrap();
+        fs::write(idb.join("000007.ldb"), crate::chromium::tests::leveldb_table(&stored, true)).unwrap();
+        assert_eq!(cached_email(dir.path(), id).as_deref(), Some("someone@gmail.com"));
+    }
+
+    fn find_bytes_in_opt(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        crate::chromium::find_bytes(hay, needle)
+    }
+
+    fn find_bytes_in(hay: &[u8], needle: &[u8]) -> usize {
+        find_bytes_in_opt(hay, needle).expect("present")
     }
 
     #[test]

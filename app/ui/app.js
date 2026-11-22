@@ -107,8 +107,10 @@ function checkName(values) {
 
 // ---- drawing ----
 
-// Emails are shown as they are; an opaque account id (a UUID) is shortened.
-function showIdentity(identity) {
+// Prefer the label (an email) when the backend found one; show an email
+// identity as it is, and shorten an opaque account id (a UUID).
+function showIdentity(identity, label) {
+  if (label) return label;
   if (!identity) return '';
   return identity.includes('@') ? identity : `帳號 ID ${identity.slice(0, 8)}…`;
 }
@@ -136,7 +138,7 @@ function drawSidebar() {
 }
 
 function drawLive(p) {
-  const identity = esc(showIdentity(p.live_identity) || '已登入');
+  const identity = esc(showIdentity(p.live_identity, p.live_label) || '已登入');
   if (!p.logged_in) {
     const how = p.login_command ? `，或在終端機執行 <code>${esc(p.login_command)}</code>` : '';
     let hint;
@@ -187,7 +189,7 @@ function drawAccounts(p) {
     return '<div class="card none">還沒有儲存任何帳號。</div>';
   }
   const rows = p.accounts.map((a) => {
-    const meta = [showIdentity(a.identity), a.note, `存於 ${when(a.updated_at)}`].filter(Boolean).map(esc).join(' · ');
+    const meta = [showIdentity(a.identity, a.label), a.note, `存於 ${when(a.updated_at)}`].filter(Boolean).map(esc).join(' · ');
     const badge = a.active
       ? (p.matches_active
         ? '<span class="chip ok">使用中</span>'
@@ -364,7 +366,7 @@ async function perform(command, args) {
 }
 
 function suggestName(p) {
-  const local = (p.live_identity || '').split('@')[0].replace(/[^A-Za-z0-9._+-]/g, '');
+  const local = (p.live_label || p.live_identity || '').split('@')[0].replace(/[^A-Za-z0-9._+-]/g, '');
   return NAME_RULE.test(local) ? local : '';
 }
 
@@ -383,7 +385,7 @@ const actions = {
   async save(p) {
     const values = await ask({
       title: `儲存目前的 ${p.name} 登入`,
-      body: p.live_identity ? `目前登入：${showIdentity(p.live_identity)}` : '',
+      body: p.live_identity ? `目前登入：${showIdentity(p.live_identity, p.live_label)}` : '',
       fields: [
         { key: 'name', label: '帳號名稱', value: suggestName(p), placeholder: '例如 work 或 personal' },
         { key: 'note', label: '備註（選填）', placeholder: '例如 公司帳號' },

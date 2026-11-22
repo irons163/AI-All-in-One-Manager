@@ -405,9 +405,21 @@ fn desktop_login(home: &Path, who: &str, startups: u32) {
     let _ = fs::remove_dir_all(dir.join("IndexedDB"));
     fs::create_dir_all(&idb).unwrap();
     fs::write(idb.join("CURRENT"), format!("idb of {who}")).unwrap();
+    // The web app's cached account object, V8-serialised as the app stores it.
+    fs::write(idb.join("000004.log"), v8_account(&format!("uuid-{who}"), &format!("{who}@example.com"))).unwrap();
     // Not part of the login: must never be touched.
     fs::create_dir_all(dir.join("claude-code-sessions")).unwrap();
     fs::write(dir.join("claude_desktop_config.json"), "{\"mcpServers\":{}}").unwrap();
+}
+
+fn v8_account(uuid: &str, email: &str) -> Vec<u8> {
+    let mut b = b"\xff\x0fo\"\x04uuid\"".to_vec();
+    b.push(uuid.len() as u8);
+    b.extend_from_slice(uuid.as_bytes());
+    b.extend_from_slice(b"\"\x0demail_address\"");
+    b.push(email.len() as u8);
+    b.extend_from_slice(email.as_bytes());
+    b
 }
 
 fn desktop_ctx(home: &Path, running: bool, refuse_quit: bool) -> Ctx {
@@ -442,12 +454,13 @@ fn desktop_switch_closes_swaps_and_reopens_the_app() {
 
     desktop_login(home, "alice", 1);
     let a = ops::adopt(&ctx, &desktop).unwrap().unwrap();
-    assert_eq!(a.name, "account", "a UUID does not make a name");
-    assert_eq!(a.identity.as_deref(), Some("uuid-alice"));
-    ops::rename(&ctx, &desktop, "account", "alice").unwrap();
+    assert_eq!(a.name, "alice", "named after the cached email");
+    assert_eq!(a.identity.as_deref(), Some("uuid-alice"), "matched by the account id");
+    assert_eq!(a.label.as_deref(), Some("alice@example.com"));
 
     desktop_login(home, "bob", 2);
-    ops::save(&ctx, &desktop, "bob", false, None).unwrap();
+    let bob = ops::save(&ctx, &desktop, "bob", false, None).unwrap();
+    assert_eq!(bob.label.as_deref(), Some("bob@example.com"));
     assert!(ctx.apps.log().is_empty(), "saving never closes the app");
 
     // The app keeps working on bob and writes unrelated settings meanwhile.
@@ -456,6 +469,7 @@ fn desktop_switch_closes_swaps_and_reopens_the_app() {
     write(&desktop_dir(home).join("config.json"), &config);
 
     let report = ops::switch(&ctx, &desktop, "alice", false).unwrap();
+    assert_eq!(report.label.as_deref(), Some("alice@example.com"));
     assert_eq!(ctx.apps.log(), [format!("quit {BUNDLE}"), format!("launch {BUNDLE}")]);
     assert_eq!(report.restarted_app.as_deref(), Some("Claude"));
     assert!(report.synced);
@@ -539,4 +553,74 @@ fn desktop_logout_makes_room_for_a_new_named_account() {
     assert_eq!(who_is_live(home), "alice");
     ops::switch(&ctx, &desktop, "work", false).unwrap();
     assert_eq!(who_is_live(home), "carol");
+}
+
+#[test]
+fn desktop_email_is_a_label_not_an_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let ctx = desktop_ctx(home, false, false);
+    let desktop = get(&ctx, "claude-desktop");
+    let idb_log = desktop_dir(home).join("IndexedDB/https_claude.ai_0.indexeddb.leveldb/000004.log");
+
+    // The cache has been compacted away: no readable email.
+    desktop_login(home, "dana", 1);
+    fs::remove_file(&idb_log).unwrap();
+    let first = ops::adopt(&ctx, &desktop).unwrap().unwrap();
+    assert_eq!(first.name, "account");
+    assert_eq!(first.label, None);
+
+    // Later the app writes the account object again: the existing account
+    // learns its email; no second account appears for the same person.
+    fs::write(&idb_log, v8_account("uuid-dana", "dana@example.com")).unwrap();
+    assert!(ops::adopt(&ctx, &desktop).unwrap().is_none());
+    let accounts = store::list(&ctx, "claude-desktop").unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].label.as_deref(), Some("dana@example.com"));
+    assert_eq!(accounts[0].shown(), Some("dana@example.com"));
+
+    // And when the email disappears again, it is still the same account.
+    fs::remove_file(&idb_log).unwrap();
+    assert!(ops::adopt(&ctx, &desktop).unwrap().is_none());
+    let st = ops::status(&ctx, &desktop).unwrap();
+    assert!(st.matches_active);
+    assert_eq!(st.live_label, None);
+    assert_eq!(st.active.unwrap().label.as_deref(), Some("dana@example.com"), "the saved label is kept");
+}
+
+#[test]
+fn desktop_backfills_the_email_of_an_inactive_account_from_its_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let ctx = desktop_ctx(home, false, false);
+    let desktop = get(&ctx, "claude-desktop");
+    let idb_log = desktop_dir(home).join("IndexedDB/https_claude.ai_0.indexeddb.leveldb/000004.log");
+
+    // "erin" was saved while her email could not be read...
+    desktop_login(home, "erin", 1);
+    let cached = fs::read(&idb_log).unwrap();
+    fs::remove_file(&idb_log).unwrap();
+    ops::save(&ctx, &desktop, "erin", false, None).unwrap();
+    // ...then the cache appeared and was folded into her snapshot on the
+    // way out, but by a version of aiom that did not record labels.
+    fs::write(&idb_log, &cached).unwrap();
+    ops::sync(&ctx, &desktop, false).unwrap();
+    let mut meta = store::load_meta(&ctx, "claude-desktop", "erin").unwrap().unwrap();
+    meta.label = None;
+    store::save_meta(&ctx, &meta).unwrap();
+
+    desktop_login(home, "frank", 1);
+    ops::save(&ctx, &desktop, "frank", false, None).unwrap();
+
+    // erin is not live; her email comes from her saved snapshot.
+    let label = ops::backfill_label(&ctx, &desktop, "erin").unwrap();
+    assert_eq!(label.as_deref(), Some("erin@example.com"));
+    let meta = store::load_meta(&ctx, "claude-desktop", "erin").unwrap().unwrap();
+    assert_eq!(meta.label.as_deref(), Some("erin@example.com"));
+    assert_eq!(who_is_live(home), "frank", "the live login is not touched");
+
+    // Providers without labels, and accounts that already have one, are left as they are.
+    assert_eq!(ops::backfill_label(&ctx, &desktop, "frank").unwrap().as_deref(), Some("frank@example.com"));
+    let codex = get(&ctx, "codex");
+    assert_eq!(ops::backfill_label(&ctx, &codex, "nobody").unwrap(), None);
 }

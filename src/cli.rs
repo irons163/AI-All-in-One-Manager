@@ -195,7 +195,12 @@ fn cmd_status(ctx: &Ctx, providers: &[Provider], paint: &Paint) -> Result<()> {
             (None, None) => ("-".to_string(), Some("2")),
         };
         let login = if st.logged_in {
-            cell(st.live_identity.clone().unwrap_or_else(|| "logged in".into()))
+            cell(
+                st.live_label
+                    .clone()
+                    .or_else(|| st.live_identity.clone())
+                    .unwrap_or_else(|| "logged in".into()),
+            )
         } else {
             ("not logged in".to_string(), Some("2"))
         };
@@ -252,7 +257,7 @@ fn account_rows(metas: &[Meta], active: Option<&str>) -> Vec<Vec<Cell>> {
             vec![
                 ((if is_active { "*" } else { " " }).to_string(), Some("32")),
                 (m.name.clone(), is_active.then_some("32")),
-                cell(m.identity.clone().unwrap_or_else(|| "-".into())),
+                cell(m.shown().unwrap_or("-").to_string()),
                 cell(fmt_time(m.updated_at)),
                 cell(m.note.clone().unwrap_or_default()),
             ]
@@ -294,8 +299,9 @@ fn print_switch(ctx: &Ctx, p: &Provider, report: &SwitchReport, paint: &Paint) {
         eprintln!("{} {}", paint.yellow("warning:"), ctx.tilde(warning));
     }
     let identity = report
-        .identity
+        .label
         .as_ref()
+        .or(report.identity.as_ref())
         .map(|i| format!(" ({i})"))
         .unwrap_or_default();
     if report.already_active {
@@ -383,7 +389,7 @@ fn pick_account(ctx: &Ctx, p: &Provider, paint: &Paint) -> Result<String> {
             "  {mark} {}) {}  {}",
             i + 1,
             m.name,
-            paint.dim(m.identity.as_deref().unwrap_or(""))
+            paint.dim(m.shown().unwrap_or(""))
         );
     }
     print!("Switch {} to (number or name): ", p.name);
@@ -436,7 +442,7 @@ pub fn run(cli: Cli, ctx: &Ctx) -> Result<()> {
             let p = get(&provider)?;
             let meta = ops::save(ctx, p, &name, force, note)?;
             let identity = meta
-                .identity
+                .shown()
                 .map(|i| format!(" ({i})"))
                 .unwrap_or_default();
             println!(
@@ -449,10 +455,22 @@ pub fn run(cli: Cli, ctx: &Ctx) -> Result<()> {
         Cmd::Adopt { provider } => {
             let mut any = false;
             for p in selected(&providers, &provider)? {
+                for meta in store::list(ctx, &p.id)?.iter().filter(|m| m.label.is_none()) {
+                    if let Some(label) = ops::backfill_label(ctx, p, &meta.name)? {
+                        any = true;
+                        println!(
+                            "{} {}: account '{}' is {label}",
+                            paint.green("ok:"),
+                            p.name,
+                            meta.name
+                        );
+                    }
+                }
                 if let Some(adopted) = ops::adopt(ctx, p)? {
                     any = true;
                     let identity = adopted
-                        .identity
+                        .label
+                        .or(adopted.identity)
                         .map(|i| format!(" ({i})"))
                         .unwrap_or_default();
                     let what = if adopted.created {
@@ -469,7 +487,7 @@ pub fn run(cli: Cli, ctx: &Ctx) -> Result<()> {
                 }
             }
             if !any {
-                println!("Nothing to save: every live login is already an account.");
+                println!("Nothing to save: every live login is already an account, and no saved account has a new email to show.");
             }
         }
         Cmd::Use {
@@ -537,7 +555,7 @@ pub fn run(cli: Cli, ctx: &Ctx) -> Result<()> {
                 eprintln!("{} {}", paint.yellow("warning:"), ctx.tilde(warning));
             }
             let identity = meta
-                .identity
+                .shown()
                 .map(|i| format!(" ({i})"))
                 .unwrap_or_default();
             println!(

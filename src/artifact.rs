@@ -348,6 +348,36 @@ pub fn unpack_dir(bytes: &[u8], dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The files in a `pack_dir` snapshot, as (relative path, content), read in
+/// memory. `None` if the bytes are not a well-formed snapshot.
+pub fn packed_files(bytes: &[u8]) -> Option<Vec<(String, &[u8])>> {
+    if !bytes.starts_with(DIR_MAGIC) {
+        return None;
+    }
+    let mut files = Vec::new();
+    let mut at = DIR_MAGIC.len();
+    let take = |n: usize, at: &mut usize| -> Option<&[u8]> {
+        let end = at.checked_add(n).filter(|end| *end <= bytes.len())?;
+        let slice = &bytes[*at..end];
+        *at = end;
+        Some(slice)
+    };
+    while at < bytes.len() {
+        let kind = take(1, &mut at)?[0];
+        let len = u32::from_be_bytes(take(4, &mut at)?.try_into().ok()?) as usize;
+        let rel = std::str::from_utf8(take(len, &mut at)?).ok()?.to_string();
+        match kind {
+            b'd' => {}
+            b'f' => {
+                let size = u64::from_be_bytes(take(8, &mut at)?.try_into().ok()?);
+                files.push((rel, take(usize::try_from(size).ok()?, &mut at)?));
+            }
+            _ => return None,
+        }
+    }
+    Some(files)
+}
+
 fn temp_sibling(path: &Path, tag: &str) -> Result<PathBuf> {
     let name = path
         .file_name()
@@ -536,6 +566,11 @@ mod tests {
         assert!(dir.join("empty").is_dir());
         assert!(!dir.join("extra.txt").exists());
         assert_eq!(art.read_live(&ctx).unwrap().unwrap(), a);
+        let listed = packed_files(&a).unwrap();
+        let names: Vec<&str> = listed.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["leveldb/CURRENT", "leveldb/sub/000003.log"]);
+        assert_eq!(listed[1].1, [0, 1, 2, 255]);
+        assert!(packed_files(b"not a snapshot").is_none());
         let leftovers = fs::read_dir(tmp.path())
             .unwrap()
             .flatten()

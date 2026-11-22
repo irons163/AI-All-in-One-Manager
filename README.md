@@ -43,7 +43,7 @@ App 的畫面：
 - **第一次切換時 macOS 會詢問**是否允許 AIOM 控制 Claude（「自動化」權限），請按允許。若曾拒絕，可到「系統設定 → 隱私權與安全性 → 自動化」開啟。
 - **管理的內容**：`~/Library/Application Support/Claude/` 底下 `config.json` 的 `oauth:tokenCacheV2`、`oauth:tokenCache`、`lastKnownAccountUuid` 欄位、`Cookies`，以及 `Local Storage`、`Session Storage`、`IndexedDB`、`WebStorage` 資料夾。MCP 設定、擴充功能、工作階段等其他資料都不會動。
 - 這些資料由這台 Mac 鑰匙圈裡的「Claude Safe Storage」金鑰加密，所以存檔只能在同一台 Mac 上使用，搬到別台無效。
-- 帳號以 Claude 的帳號 ID 辨識（畫面上顯示為「帳號 ID 0e58fc24…」），建議存檔時取好認的名稱。
+- 畫面上顯示帳號的**信箱**，取自 Claude 網頁版快取在 `IndexedDB` 裡的帳號資料（AIOM 能讀 LevelDB 與 Snappy 壓縮過的格式；未使用中的帳號則從它的存檔讀取，只讀不改）。不過 AIOM 實際是用**帳號 ID** 辨識帳號：那份快取隨時可能被壓縮成讀不到的格式，信箱只拿來顯示，讀不到時改顯示「帳號 ID 0e58fc24…」，不會因此把同一個人當成新帳號。
 
 命令列也可以操作：
 
