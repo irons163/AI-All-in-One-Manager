@@ -5,7 +5,7 @@ const call = window.__TAURI__
   ? (command, args) => window.__TAURI__.core.invoke(command, args)
   : window.aiomMock; // opened in a plain browser: demo data, nothing is touched
 
-const state = { providers: [], selected: null, busy: false };
+const state = { providers: [], selected: null, busy: false, usage: {} };
 
 const $ = (id) => document.getElementById(id);
 
@@ -184,6 +184,105 @@ function drawLive(p) {
     </section>`;
 }
 
+// ---- usage limits ----
+
+// Usage is asked from each provider's service with every saved login, so it
+// is kept for a few minutes instead of being asked on every redraw.
+const USAGE_TTL_MS = 5 * 60 * 1000;
+
+const PLANS = { free: 'Free', plus: 'Plus', pro: 'Pro', team: 'Team', business: 'Business', enterprise: 'Enterprise', edu: 'Edu' };
+
+function planName(plan) {
+  if (!plan) return '';
+  if (PLANS[plan]) return PLANS[plan];
+  if (plan.includes('business')) return 'Business';
+  return plan;
+}
+
+function windowName(minutes) {
+  if (minutes === 300) return '5 小時';
+  if (minutes === 10080) return '每週';
+  if (minutes % 1440 === 0) return `${minutes / 1440} 天`;
+  if (minutes % 60 === 0) return `${minutes / 60} 小時`;
+  return `${minutes} 分鐘`;
+}
+
+function timeUntil(seconds) {
+  const left = Math.max(0, seconds - Date.now() / 1000);
+  const d = Math.floor(left / 86400);
+  const h = Math.floor((left % 86400) / 3600);
+  const m = Math.floor((left % 3600) / 60);
+  if (d) return `${d} 天 ${h} 小時後`;
+  if (h) return `${h} 小時 ${m} 分後`;
+  return `${Math.max(m, 1)} 分鐘後`;
+}
+
+function ensureUsage(p, { force = false } = {}) {
+  if (!p || !p.usage || !p.accounts.length) return;
+  const entry = state.usage[p.id];
+  if (entry && (entry.loading || (!force && Date.now() - entry.at < USAGE_TTL_MS))) return;
+  state.usage[p.id] = { ...(entry || {}), loading: true };
+  call('account_usage', { provider: p.id })
+    .then((reports) => {
+      const accounts = {};
+      (reports || []).forEach((r) => { accounts[r.name] = r; });
+      state.usage[p.id] = { at: Date.now(), loading: false, accounts };
+    })
+    .catch((error) => {
+      state.usage[p.id] = { at: Date.now(), loading: false, accounts: {}, error: String(error) };
+    })
+    .finally(() => { if (current()?.id === p.id) drawMain(); });
+}
+
+function drawUsage(p, a) {
+  if (!p.usage) return '';
+  const entry = state.usage[p.id];
+  const r = entry?.accounts?.[a.name];
+  if (!r) {
+    const text = entry?.loading ? '正在查詢額度…' : (entry?.error ? '無法查詢額度' : '');
+    return text ? `<div class="usage muted">${esc(text)}</div>` : '';
+  }
+  if (r.state === 'expired') {
+    return '<div class="usage note warn">這個帳號存檔的登入已過期或已登出，查不到額度。切換過去使用一次就會更新。</div>';
+  }
+  if (r.state === 'unavailable') return `<div class="usage note">${esc(r.reason)}</div>`;
+  if (r.state === 'failed') return `<div class="usage note warn" title="${esc(r.error)}">查詢額度失敗：${esc(r.error)}</div>`;
+  const u = r.usage;
+  const plan = planName(u.plan) ? `<span class="chip">${esc(planName(u.plan))}</span>` : '';
+  const out = u.limit_reached ? '<span class="chip danger">額度已用完</span>' : '';
+  const windows = u.windows.map((w) => {
+    const pct = Math.max(0, Math.min(100, w.used_percent));
+    const level = pct >= 100 ? 'full' : pct >= 80 ? 'high' : '';
+    const reset = w.resets_at
+      ? `<span class="reset" title="${esc(when(w.resets_at))}">${esc(timeUntil(w.resets_at))}重置</span>`
+      : '';
+    return `
+      <div class="limit">
+        <span class="label">${esc(windowName(w.minutes))}</span>
+        <span class="bar ${level}" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"
+          aria-label="${esc(windowName(w.minutes))}已用 ${Math.round(pct)}%"><i style="width:${pct}%"></i></span>
+        <span class="pct">${Math.round(pct)}%</span>
+        ${reset}
+      </div>`;
+  }).join('');
+  const chips = plan || out ? `<div class="chips">${plan}${out}</div>` : '';
+  return `<div class="usage">${chips}${windows || '<span class="muted">沒有回報額度限制</span>'}</div>`;
+}
+
+function usageHeader(p) {
+  if (!p.usage || !p.accounts.length) return '';
+  const entry = state.usage[p.id];
+  const age = entry?.at && !entry.loading
+    ? `<span class="muted">額度查詢於 ${new Date(entry.at).toLocaleTimeString('zh-TW', { timeStyle: 'short' })}</span>`
+    : '';
+  return `
+    <span class="section-tools">
+      ${age}
+      <button type="button" class="ghost small" data-action="usage" ${entry?.loading ? 'disabled' : ''}
+        title="用每個帳號的存檔向服務查詢目前的使用額度">${entry?.loading ? '查詢中…' : '更新額度'}</button>
+    </span>`;
+}
+
 function drawAccounts(p) {
   if (!p.accounts.length) {
     return '<div class="card none">還沒有儲存任何帳號。</div>';
@@ -205,6 +304,7 @@ function drawAccounts(p) {
         <div>
           <div class="title"><span class="selectable">${esc(a.name)}</span>${badge}</div>
           <div class="meta">${meta}</div>
+          ${drawUsage(p, a)}
         </div>
         <div class="actions">
           ${switchButton}
@@ -304,12 +404,13 @@ function drawMain() {
       <h2>為什麼有些按鈕不能按</h2>
       <ul>${reasons.map((r) => `<li>${r}</li>`).join('')}</ul>
     </aside>` : ''}
-    <h2 class="section">已儲存的帳號</h2>
+    <h2 class="section with-tools"><span>已儲存的帳號</span>${usageHeader(p)}</h2>
     ${drawAccounts(p)}
     <details class="locations">
       <summary>AIOM 為 ${esc(p.name)} 管理的憑證位置</summary>
       <ul class="card">${locations}</ul>
     </details>`;
+  ensureUsage(p);
 }
 
 function draw() {
@@ -465,6 +566,11 @@ const actions = {
       danger: true,
     });
     if (sure) await perform('remove_account', { provider: p.id, name });
+  },
+
+  usage(p) {
+    ensureUsage(p, { force: true });
+    drawMain();
   },
 
   async restore(p) {

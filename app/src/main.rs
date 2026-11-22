@@ -154,6 +154,8 @@ struct ProviderView {
     app_installed: bool,
     /// Whether that app is running now.
     app_running: bool,
+    /// Whether the usage limits of its accounts can be looked up.
+    usage: bool,
 }
 
 #[derive(Serialize, Default)]
@@ -212,6 +214,7 @@ fn provider_view(ctx: &Ctx, p: &Provider) -> Result<ProviderView> {
         app: p.app.as_ref().map(|a| a.name.clone()),
         app_login: p.login_in_app(),
         app_installed: p.app_installed(),
+        usage: p.usage.is_some(),
         app_running: p
             .app
             .as_ref()
@@ -242,7 +245,7 @@ fn switch_outcome(ctx: &Ctx, p: &Provider, report: ops::SwitchReport) -> Outcome
         if p.login_in_app() {
             text.push('。');
         } else {
-            text.push_str(&format!("。請重新啟動執行中的 {}。", p.name));
+            text.push_str(&format!("。{}", restart_hint(p)));
         }
         text
     };
@@ -379,6 +382,16 @@ fn sync_account(provider: String, force: bool) -> Result<Outcome, String> {
     })
 }
 
+/// How much of each saved account's usage limits is used. Asks the
+/// provider's service once per account, in parallel.
+#[tauri::command(async)]
+fn account_usage(provider: String) -> Result<Option<Vec<aiom::usage::AccountReport>>, String> {
+    run(|ctx, providers| {
+        let p = provider::find(providers, &provider)?;
+        aiom::usage::accounts(ctx, p)
+    })
+}
+
 #[tauri::command(async)]
 fn rename_account(provider: String, from: String, to: String) -> Result<Outcome, String> {
     run(|ctx, providers| {
@@ -407,12 +420,21 @@ fn restore_login(provider: String) -> Result<Outcome, String> {
         let p = provider::find(providers, &provider)?;
         let (_, identity) = ops::restore(ctx, p)?;
         Ok(Outcome::new(format!(
-            "已還原 {} 上一次切換前的登入{}。請重新啟動執行中的 {}。",
+            "已還原 {} 上一次切換前的登入{}。{}",
             p.name,
             identity_suffix(&identity),
-            p.name
+            restart_hint(p)
         )))
     })
+}
+
+/// What to restart after the live login changed under a running CLI.
+fn restart_hint(p: &Provider) -> String {
+    match &p.binary {
+        Some(binary) => format!("終端機裡執行中的 {binary} 工作階段請重新啟動。"),
+        None if p.login_in_app() => String::new(),
+        None => format!("請重新啟動執行中的 {}。", p.name),
+    }
 }
 
 fn shell_quote(text: &str) -> String {
@@ -607,6 +629,7 @@ fn main() {
             switch_account,
             next_account,
             sync_account,
+            account_usage,
             rename_account,
             remove_account,
             restore_login,

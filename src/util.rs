@@ -280,3 +280,52 @@ mod tests {
         assert!(leftovers.is_empty());
     }
 }
+
+/// GET `url` with `curl` (present on every macOS and most Linux systems).
+/// The headers, which may carry credentials, go through curl's stdin rather
+/// than its command line, where other users could see them. Returns the HTTP
+/// status and the body.
+pub fn http_get(url: &str, headers: &[(&str, &str)], timeout_secs: u64) -> anyhow::Result<(u16, Vec<u8>)> {
+    use anyhow::bail;
+    use std::process::{Command, Stdio};
+
+    let mut input = String::new();
+    for (name, value) in headers {
+        if name.contains(['\r', '\n', ':']) || value.contains(['\r', '\n']) {
+            bail!("invalid HTTP header {name}");
+        }
+        input.push_str(&format!("{name}: {value}\n"));
+    }
+    let mut child = Command::new("curl")
+        .args(["--silent", "--show-error", "--max-time"])
+        .arg(timeout_secs.to_string())
+        .args(["--header", "@-", "--write-out", "\n%{http_code}", "--", url])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("running curl")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(input.as_bytes()).context("passing headers to curl")?;
+    }
+    let out = child.wait_with_output().context("running curl")?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        bail!("{}", err.trim().trim_start_matches("curl: "));
+    }
+    let mut body = out.stdout;
+    let split = body.iter().rposition(|&b| b == b'\n').unwrap_or(0);
+    let code = std::str::from_utf8(&body[split..])
+        .ok()
+        .and_then(|c| c.trim().parse().ok())
+        .context("curl did not report an HTTP status")?;
+    body.truncate(split);
+    Ok((code, body))
+}
+
+/// A numeric claim of a JWT, such as `exp`.
+pub fn jwt_number(token: &str, claim: &str) -> Option<u64> {
+    let payload = token.split('.').nth(1)?;
+    let json: Value = serde_json::from_slice(&b64url_decode(payload)?).ok()?;
+    json.get(claim)?.as_u64()
+}

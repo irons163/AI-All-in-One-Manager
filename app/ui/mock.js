@@ -41,10 +41,14 @@
       install: null, has_backup: true,
     },
     {
-      id: 'codex', name: 'Codex CLI', builtin: true, cli: 'codex', cli_installed: true,
-      app: 'ChatGPT', app_login: false, app_installed: true, app_running: true,
+      id: 'codex', name: 'Codex', builtin: true, cli: 'codex', cli_installed: true,
+      app: 'ChatGPT', app_login: false, app_installed: true, app_running: true, usage: true,
       logged_in: true, live_identity: 'someone@new.example', active: null, matches_active: false,
-      accounts: [],
+      accounts: [
+        account('personal', 'me@home.example', null, 86400),
+        account('work', 'dev@corp.example', '公司帳號', 3600 * 5),
+        account('old', 'old@home.example', null, 86400 * 20),
+      ],
       artifacts: [{ location: '~/.codex/auth.json', primary: true, present: true }],
       login_command: 'codex login',
       install: 'npm install -g @openai/codex', has_backup: false,
@@ -144,6 +148,22 @@
       p.active = null;
       p.matches_active = false;
       return done(`已還原 ${p.name} 上一次切換前的登入。`);
+    },
+
+    account_usage({ provider }) {
+      const p = find(provider);
+      if (!p.usage) return null;
+      const hour = 3600;
+      const demo = [
+        [{ minutes: 300, used_percent: 12, resets_at: now + 3 * hour }, { minutes: 10080, used_percent: 41, resets_at: now + 3 * 86400 }],
+        [{ minutes: 300, used_percent: 0, resets_at: now + 5 * hour }, { minutes: 10080, used_percent: 100, resets_at: now + 20 * hour }],
+      ];
+      return p.accounts.map((a, i) => (i === 2
+        ? { name: a.name, active: a.active, state: 'expired' }
+        : {
+          name: a.name, active: a.active, state: 'ok',
+          usage: { plan: 'plus', windows: demo[i % 2], limit_reached: demo[i % 2][1].used_percent >= 100 },
+        }));
     },
 
     start_login({ provider, name }) {

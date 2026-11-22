@@ -126,6 +126,7 @@ opencode  installed  logged in      (not saved)     0
 | `aiom sync [provider]` | 把目前登入（含刷新過的 token）更新回使用中帳號的存檔 |
 | `aiom rename <provider> <old> <new>` | 重新命名帳號 |
 | `aiom remove <provider> <name>` | 刪除帳號存檔，不影響目前登入（別名 `rm`；`-y` 略過確認） |
+| `aiom usage [provider]` | 查詢每個帳號的使用額度（目前支援 `codex`），見下方「使用額度」 |
 | `aiom restore <provider>` | 還原上一次切換前的登入狀態 |
 | `aiom path` | 顯示 aiom 的資料目錄 |
 
@@ -178,6 +179,27 @@ jwt_claim = "email"          # 省略 jwt_claim 則直接取該欄位的字串
 
 `file` 與 `keychain` 預設 `primary = true`（存在即視為已登入），`json-keys` 預設 `primary = false`。
 
+## 使用額度
+
+AIOM 可以顯示每個 **Codex** 帳號的 5 小時與每週額度：已用百分比、何時重置、方案（Plus、Pro…），用完的帳號會標示「額度已用完」，方便挑還有額度的帳號切換。
+
+- 視窗：打開「Codex」頁就會自動查詢，結果保留 5 分鐘；按「已儲存的帳號」右邊的「更新額度」可立即重新查詢。
+- 命令列：`aiom usage` 或 `aiom usage codex`。
+
+```text
+codex (Codex)
+   ACCOUNT   PLAN  USED
+*  work      plus  5h 12%, resets in 2h 59m; week 41%, resets in 2d 23h
+   personal  plus  5h 0%, resets in 5h 0m; week 100%, resets in 19h 59m
+```
+
+做法和 Codex CLI 與 Codex App 顯示額度時相同：用該帳號的登入向 `https://chatgpt.com/backend-api/wham/usage` 查詢。
+
+- **只讀**：使用中的帳號用目前的登入（最新），其他帳號用存檔；只在記憶體裡讀取，不會刷新或改寫任何憑證。
+- 每個帳號的憑證只送到 OpenAI 自己的伺服器，經由 `curl` 的標準輸入傳遞，不會出現在指令列上。
+- 存檔的登入過期（Codex 的登入約 10 天）或已在別處登出時，會顯示「已過期」。切換到那個帳號用一次，Codex 就會更新登入。
+- 這不是 OpenAI 公開文件中的 API，日後可能變動。
+
 ## 運作方式與安全性
 
 - 帳號存檔位於 `~/.aiom/profiles/<provider>/<帳號>/`，目錄權限 `0700`、檔案 `0600`。可用環境變數 `AIOM_HOME` 改變位置。
@@ -188,7 +210,7 @@ jwt_claim = "email"          # 省略 jwt_claim 則直接取該欄位的字串
 - 如果目前登入的身分和使用中帳號不同（例如你直接在 CLI 裡登入了別的帳號），aiom **不會**用它覆寫既有帳號，只會備份並提出警告。
 - 切換到已經在使用中的帳號不會做任何事，避免把刷新過的 token 換回舊的；需要強制還原存檔時加 `--force`。
 - 所有寫入都是先寫暫存檔再 rename，其他程式不會讀到寫到一半的憑證。
-- aiom 完全離線運作，不會把任何資料送到網路上。
+- 除了查詢使用額度（見上方「使用額度」，只連到該服務自己的伺服器），aiom 不會連上網路，也不會把任何資料送出去。
 
 切換後請重新啟動正在執行中的 CLI 工作階段，它們才會讀到新的登入。
 

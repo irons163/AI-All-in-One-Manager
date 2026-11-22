@@ -36,7 +36,17 @@ pub struct Provider {
     /// identity is an opaque id. Display only: it may be unavailable at
     /// times, so it is never used to tell accounts apart.
     pub label: Vec<IdentitySource>,
+    /// Where to look up how much of the account's quota is used, if known.
+    pub usage: Option<UsageApi>,
     pub builtin: bool,
+}
+
+/// A service that reports an account's usage limits.
+#[derive(Debug, Clone)]
+pub enum UsageApi {
+    /// ChatGPT's Codex usage endpoint. The credentials are the JSON artifact
+    /// `artifact`, holding `tokens.access_token` and `tokens.account_id`.
+    Codex { artifact: String },
 }
 
 #[derive(Debug, Clone)]
@@ -332,6 +342,7 @@ fn claude(ctx: &Ctx) -> Provider {
         artifacts,
         identity: vec![json_string(&state_file, "oauthAccount.emailAddress")],
         label: Vec::new(),
+        usage: None,
         builtin: true,
     }
 }
@@ -384,6 +395,7 @@ fn claude_desktop(ctx: &Ctx) -> Provider {
             id_path: config.clone(),
             id_key: "lastKnownAccountUuid".into(),
         }],
+        usage: None,
         builtin: true,
     }
 }
@@ -414,13 +426,13 @@ fn codex_app(ctx: &Ctx) -> AppInfo {
     }
 }
 
-/// OpenAI Codex CLI: everything is in `$CODEX_HOME/auth.json`.
+/// OpenAI Codex (CLI and desktop app): everything is in `$CODEX_HOME/auth.json`.
 fn codex(ctx: &Ctx) -> Provider {
     let home = ctx.dir_from("CODEX_HOME", ctx.home.join(".codex"));
     let auth = home.join("auth.json");
     Provider {
         id: "codex".into(),
-        name: "Codex CLI".into(),
+        name: "Codex".into(),
         binary: Some("codex".into()),
         login: command(&["codex", "login"]),
         install: Some("npm install -g @openai/codex".into()),
@@ -436,6 +448,9 @@ fn codex(ctx: &Ctx) -> Provider {
             },
         ],
         label: Vec::new(),
+        usage: Some(UsageApi::Codex {
+            artifact: "auth.json".into(),
+        }),
         builtin: true,
     }
 }
@@ -476,6 +491,7 @@ fn gemini(ctx: &Ctx) -> Provider {
         artifacts,
         identity: vec![json_string(&accounts, "active")],
         label: Vec::new(),
+        usage: None,
         builtin: true,
     }
 }
@@ -500,6 +516,7 @@ fn grok(ctx: &Ctx) -> Provider {
             jwt(&auth, "tokens.id_token", "email"),
         ],
         label: Vec::new(),
+        usage: None,
         builtin: true,
     }
 }
@@ -522,6 +539,7 @@ fn opencode(ctx: &Ctx) -> Provider {
         )],
         identity: Vec::new(),
         label: Vec::new(),
+        usage: None,
         builtin: true,
     }
 }
@@ -746,6 +764,7 @@ fn build_custom(ctx: &Ctx, raw: CustomProvider) -> Result<Provider> {
         artifacts,
         identity,
         label: Vec::new(),
+        usage: None,
         builtin: false,
     })
 }

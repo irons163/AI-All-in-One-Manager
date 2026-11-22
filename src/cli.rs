@@ -6,6 +6,7 @@ use crate::provider::{self, Provider};
 use crate::store::{self, Meta};
 use crate::util::fmt_time;
 use anyhow::{bail, Result};
+use crate::usage::{window_name, AccountUsage};
 use clap::{Parser, Subcommand};
 use std::io::{self, BufRead, IsTerminal, Write};
 
@@ -100,6 +101,12 @@ pub enum Cmd {
         provider: String,
         old: String,
         new: String,
+    },
+    /// Show how much of each saved account's usage limits is used, asked
+    /// from the provider's service with that account's saved login
+    Usage {
+        /// Only this provider (default: every provider that reports usage)
+        provider: Option<String>,
     },
     /// Put back the login that was live before the last switch
     Restore { provider: String },
@@ -294,6 +301,84 @@ fn cmd_list(ctx: &Ctx, providers: &[&Provider], paint: &Paint, explicit: bool) -
     Ok(())
 }
 
+/// "in 4h 12m", "in 2d 3h": how long until a Unix time.
+fn time_until(at: u64, now: u64) -> String {
+    let left = at.saturating_sub(now);
+    let (d, h, m) = (left / 86_400, left % 86_400 / 3600, left % 3600 / 60);
+    match (d, h) {
+        (0, 0) => format!("in {}m", m.max(1)),
+        (0, _) => format!("in {h}h {m}m"),
+        _ => format!("in {d}d {h}h"),
+    }
+}
+
+fn cmd_usage(ctx: &Ctx, providers: &[&Provider], paint: &Paint, explicit: bool) -> Result<()> {
+    let now = crate::util::now_secs();
+    let mut shown = false;
+    for p in providers {
+        let Some(reports) = crate::usage::accounts(ctx, p)? else {
+            if explicit {
+                println!("{} does not report usage limits that aiom knows how to read", p.name);
+            }
+            continue;
+        };
+        if reports.is_empty() && !explicit {
+            continue;
+        }
+        if shown {
+            println!();
+        }
+        shown = true;
+        println!("{} {}", paint.bold(&p.id), paint.dim(&format!("({})", p.name)));
+        if reports.is_empty() {
+            println!("  no saved accounts");
+            continue;
+        }
+        let mut rows = Vec::new();
+        for r in &reports {
+            let mark: Cell = if r.active { ("*".into(), Some("32")) } else { (" ".into(), None) };
+            let mut row = vec![mark, (r.name.clone(), None)];
+            match &r.usage {
+                AccountUsage::Ok { usage } => {
+                    row.push((usage.plan.clone().unwrap_or_else(|| "-".into()), None));
+                    let windows: Vec<String> = usage
+                        .windows
+                        .iter()
+                        .map(|w| {
+                            let resets = w
+                                .resets_at
+                                .map(|at| format!(", resets {}", time_until(at, now)))
+                                .unwrap_or_default();
+                            format!("{} {:.0}%{resets}", window_name(w.minutes), w.used_percent)
+                        })
+                        .collect();
+                    let colour = if usage.limit_reached { Some("31") } else { None };
+                    let text = if windows.is_empty() { "no limits reported".into() } else { windows.join("; ") };
+                    row.push((text, colour));
+                }
+                AccountUsage::Expired => {
+                    row.push(("-".into(), None));
+                    row.push(("saved login expired; switch to it and use it once to refresh".into(), Some("33")));
+                }
+                AccountUsage::Unavailable { reason } => {
+                    row.push(("-".into(), None));
+                    row.push((reason.clone(), Some("2")));
+                }
+                AccountUsage::Failed { error } => {
+                    row.push(("-".into(), None));
+                    row.push((format!("could not check: {error}"), Some("33")));
+                }
+            }
+            rows.push(row);
+        }
+        print_table(paint, &["", "ACCOUNT", "PLAN", "USED"], &rows);
+    }
+    if !shown && !explicit {
+        println!("No saved accounts of a provider that reports usage (currently: codex).");
+    }
+    Ok(())
+}
+
 fn print_switch(ctx: &Ctx, p: &Provider, report: &SwitchReport, paint: &Paint) {
     for warning in &report.warnings {
         eprintln!("{} {}", paint.yellow("warning:"), ctx.tilde(warning));
@@ -323,7 +408,8 @@ fn print_switch(ctx: &Ctx, p: &Provider, report: &SwitchReport, paint: &Paint) {
         println!("    {app} was closed for the switch and has been started again");
     }
     if !p.login_in_app() {
-        println!("    restart any running {} session to pick up the change", p.name);
+        let what = p.binary.as_deref().unwrap_or(&p.name);
+        println!("    restart any running {what} session to pick up the change");
     }
 }
 
@@ -433,6 +519,9 @@ pub fn run(cli: Cli, ctx: &Ctx) -> Result<()> {
         Cmd::Providers => cmd_providers(ctx, &providers, &paint),
         Cmd::List { provider } => {
             cmd_list(ctx, &selected(&providers, &provider)?, &paint, provider.is_some())?
+        }
+        Cmd::Usage { provider } => {
+            cmd_usage(ctx, &selected(&providers, &provider)?, &paint, provider.is_some())?
         }
         Cmd::Add {
             provider,

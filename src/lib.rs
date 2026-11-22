@@ -15,4 +15,5 @@ pub mod ops;
 pub mod provider;
 pub mod secrets;
 pub mod store;
+pub mod usage;
 pub mod util;

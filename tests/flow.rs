@@ -722,3 +722,96 @@ fn codex_login_keeps_the_app_closed_until_it_is_done() {
     );
     assert_eq!(store::active(&ctx, "codex").unwrap().as_deref(), Some("new"));
 }
+
+// ---- usage limits ------------------------------------------------------------
+
+/// A one-shot HTTP server standing in for the usage service: answers
+/// `requests` requests according to the bearer token, and returns the
+/// tokens it saw.
+fn usage_server(requests: usize) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/backend-api/wham/usage", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let mut seen = Vec::new();
+        for stream in listener.incoming().take(requests) {
+            let mut stream = stream.unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let (mut token, mut account) = (String::new(), String::new());
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                let lower = line.to_ascii_lowercase();
+                if let Some(v) = lower.strip_prefix("authorization: bearer ") {
+                    token = v.trim().to_string();
+                }
+                if let Some(v) = lower.strip_prefix("chatgpt-account-id: ") {
+                    account = v.trim().to_string();
+                }
+            }
+            let (status, body) = match token.as_str() {
+                "a1" => ("200 OK", json!({"plan_type": "plus", "rate_limit": {"limit_reached": false,
+                    "primary_window": {"used_percent": 25, "limit_window_seconds": 18000, "reset_at": 5000}}})),
+                "b2" => ("200 OK", json!({"plan_type": "pro", "rate_limit": {"limit_reached": true,
+                    "secondary_window": {"used_percent": 100, "limit_window_seconds": 604800, "reset_at": 9000}}})),
+                _ => ("401 Unauthorized", json!({"error": "bad token"})),
+            };
+            let body = body.to_string();
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            seen.push(format!("{token}/{account}"));
+        }
+        seen.sort();
+        seen
+    });
+    (url, handle)
+}
+
+#[test]
+fn usage_uses_the_freshest_login_of_each_account() {
+    use aiom::usage::{self, AccountUsage};
+    let (dir, mut ctx) = setup(false);
+    let home = dir.path();
+    let codex = get(&ctx, "codex");
+    let (url, server) = usage_server(3);
+    ctx.set_var("AIOM_CODEX_USAGE_URL", &url);
+
+    codex_login(home, "a@x.io", "a1");
+    ops::save(&ctx, &codex, "a", false, None).unwrap();
+    codex_login(home, "c@x.io", "c-revoked");
+    ops::save(&ctx, &codex, "c", false, None).unwrap();
+    codex_login(home, "b@x.io", "b1");
+    ops::save(&ctx, &codex, "b", false, None).unwrap();
+    // The CLI refreshes b's token in place; the snapshot still has b1.
+    write(
+        &codex_auth(home),
+        &json!({"email": "b@x.io", "tokens": {"access_token": "b2", "account_id": "acct-b"}}),
+    );
+
+    let reports = usage::accounts(&ctx, &codex).unwrap().unwrap();
+    assert_eq!(server.join().unwrap(), ["a1/", "b2/acct-b", "c-revoked/"]);
+    let by_name = |name: &str| reports.iter().find(|r| r.name == name).unwrap();
+
+    let AccountUsage::Ok { usage: a } = &by_name("a").usage else { panic!("a: {:?}", by_name("a")) };
+    assert_eq!(a.plan.as_deref(), Some("plus"));
+    assert_eq!(a.windows[0].minutes, 300);
+    assert_eq!(a.windows[0].used_percent, 25.0);
+    assert!(!a.limit_reached);
+
+    assert!(by_name("b").active);
+    let AccountUsage::Ok { usage: b } = &by_name("b").usage else { panic!("b: {:?}", by_name("b")) };
+    assert!(b.limit_reached);
+    assert_eq!(b.windows[0].minutes, 10_080);
+
+    assert_eq!(by_name("c").usage, AccountUsage::Expired);
+    // Looking up usage never changes a saved login.
+    assert_eq!(read(&codex_auth(home))["tokens"]["access_token"], "b2");
+
+    assert!(usage::accounts(&ctx, &get(&ctx, "gemini")).unwrap().is_none());
+}

@@ -667,6 +667,33 @@ pub fn backfill_label(ctx: &Ctx, p: &Provider, name: &str) -> Result<Option<Stri
     Ok(label)
 }
 
+/// One credential file of a saved account, read in memory: the live copy
+/// when the live login is this (active) account, since the CLI refreshes
+/// tokens in place and the live copy is then the freshest; otherwise the
+/// saved snapshot.
+pub fn account_artifact(
+    ctx: &Ctx,
+    p: &Provider,
+    meta: &Meta,
+    active: Option<&str>,
+    artifact: &str,
+) -> Result<Option<Vec<u8>>> {
+    let art = p
+        .artifacts
+        .iter()
+        .find(|a| a.id == artifact)
+        .ok_or_else(|| anyhow!("{} has no credential named '{artifact}'", p.name))?;
+    if active == Some(meta.name.as_str())
+        && p.logged_in(ctx)
+        && compatible(&p.live_identity(), &meta.identity)
+    {
+        if let Some(data) = art.read_live(ctx)? {
+            return Ok(Some(data));
+        }
+    }
+    snap_get(ctx, &store::profile_loc(ctx, &p.id, &meta.name), art)
+}
+
 /// Delete a saved account. The live login is not touched.
 pub fn remove(ctx: &Ctx, p: &Provider, name: &str) -> Result<()> {
     if store::load_meta(ctx, &p.id, name)?.is_none() {
