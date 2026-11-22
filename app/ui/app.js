@@ -142,7 +142,7 @@ function drawLive(p) {
   if (!p.logged_in) {
     const how = p.login_command ? `，或在終端機執行 <code>${esc(p.login_command)}</code>` : '';
     let hint;
-    if (p.app) {
+    if (p.app_login) {
       hint = p.cli_installed
         ? `在 ${esc(p.app)} 裡登入後回到這裡，AIOM 會自動存成帳號。`
         : `這台電腦找不到 ${esc(p.app)} App。`;
@@ -225,9 +225,9 @@ const PROVIDER_NOTES = {
 // A greyed-out button with no explanation just looks broken.
 function disabledReasons(p) {
   const reasons = [];
-  if (p.app && !p.cli_installed) {
+  if (p.app_login && !p.cli_installed) {
     reasons.push(`<b>登入新帳號</b>：這台電腦找不到 ${esc(p.app)} App。`);
-  } else if (p.app) {
+  } else if (p.app_login) {
     // Logging in happens inside the app, so the button is always usable.
   } else if (!p.cli_installed) {
     const install = p.install
@@ -260,19 +260,21 @@ function drawMain() {
     $('main').innerHTML = '<p class="empty">沒有可用的 provider。</p>';
     return;
   }
+  const appChip = `<span class="chip ok">${esc(p.app)} App ${p.app_running ? '執行中' : '已安裝'}</span>`;
   let cliChip;
-  if (p.app) {
-    cliChip = p.cli_installed
-      ? `<span class="chip ok">${esc(p.app)} App ${p.app_running ? '執行中' : '已安裝'}</span>`
-      : `<span class="chip warn">找不到 ${esc(p.app)} App</span>`;
+  if (p.app_login) {
+    cliChip = p.cli_installed ? appChip : `<span class="chip warn">找不到 ${esc(p.app)} App</span>`;
   } else {
     cliChip = p.cli_installed
       ? '<span class="chip ok">CLI 已安裝</span>'
       : `<span class="chip warn">找不到 ${esc(p.cli || 'CLI')} 指令</span>`;
+    // An app that shares the CLI's login (the Codex app) is shown only when
+    // it is installed; it is optional.
+    if (p.app && p.app_installed) cliChip += appChip;
   }
   const customChip = p.builtin ? '' : '<span class="chip">自訂</span>';
   const canSave = p.logged_in;
-  const canLogin = p.cli_installed && (p.app || p.login_command);
+  const canLogin = p.cli_installed && (p.app_login || p.login_command);
   const canSync = p.logged_in && p.active;
   const reasons = disabledReasons(p);
   const locations = p.artifacts.map((a) => `
@@ -374,9 +376,10 @@ function suggestName(p) {
 // because whatever is going on in it (including this kind of chat) stops.
 async function confirmAppRestart(p, what) {
   if (!p.app || !p.app_running) return true;
+  const sessions = p.id === 'claude-desktop' ? `（包括在 ${p.app} 裡執行的 Claude Code 工作階段）` : '';
   return Boolean(await ask({
     title: `${what}需要先關閉 ${p.app}`,
-    body: `AIOM 會關閉 ${p.app}、替換登入資料，完成後自動重新開啟。${p.app} 裡進行中的對話與工作（包括在 ${p.app} 裡執行的 Claude Code 工作階段）會被中斷，重新開啟後可以從側邊欄接回。`,
+    body: `AIOM 會關閉 ${p.app}、替換登入資料，完成後自動重新開啟。${p.app} 裡進行中的對話與工作${sessions}會被中斷，重新開啟後可以從側邊欄接回。`,
     ok: `關閉 ${p.app} 並切換`,
   }));
 }
@@ -410,9 +413,12 @@ const actions = {
   },
 
   async login(p) {
-    const body = p.app
+    const closes = p.app && p.app_running
+      ? `${p.app} 會先關閉，登入完成後重新開啟；${p.app} 裡進行中的對話與工作會被中斷。`
+      : '';
+    const body = p.app_login
       ? `AIOM 會關閉 ${p.app}、備份目前的登入並登出，再重新開啟 ${p.app}。請在 ${p.app} 裡登入另一個帳號，回到 AIOM 後會自動存檔。${p.app} 裡進行中的對話與工作會被中斷。`
-      : `會開啟終端機視窗執行「${p.login_command}」。目前的登入會先備份，登入成功後新帳號會自動存檔；沒完成的話會還原。`;
+      : `會開啟終端機視窗執行「${p.login_command}」。目前的登入會先備份，登入成功後新帳號會自動存檔；沒完成的話會還原。${closes}`;
     const values = await ask({
       title: `登入 ${p.name} 的新帳號`,
       body,

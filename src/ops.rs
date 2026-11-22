@@ -13,7 +13,7 @@ use crate::util::{self, atomic_write, ensure_private_dir, now_secs};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -731,6 +731,22 @@ pub fn login(ctx: &Ctx, p: &Provider, name: &str, force: bool) -> Result<(Meta, 
     let program = util::find_in_path(&cmd[0], ctx.var("PATH"))
         .ok_or_else(|| anyhow!("'{}' was not found on PATH; is {} installed?", cmd[0], p.name))?;
 
+    // A desktop app sharing this login (the Codex app) would keep using the
+    // old one from memory, so it stays closed until the login is done.
+    let (result, _) = with_app_closed(ctx, p, Relaunch::IfWasRunning, || {
+        login_closed(ctx, p, name, &program, &cmd[1..])
+    })?;
+    Ok(result)
+}
+
+/// The part of `login` that touches live files; runs with any app closed.
+fn login_closed(
+    ctx: &Ctx,
+    p: &Provider,
+    name: &str,
+    program: &Path,
+    args: &[String],
+) -> Result<(Meta, Vec<String>)> {
     let mut warnings = Vec::new();
     let live = read_live(ctx, p)?;
     let previous = if has_primary(p, &live) {
@@ -750,8 +766,8 @@ pub fn login(ctx: &Ctx, p: &Provider, name: &str, force: bool) -> Result<(Meta, 
     };
     apply(ctx, p, &empty, &[])?;
 
-    let finished = Command::new(&program)
-        .args(&cmd[1..])
+    let finished = Command::new(program)
+        .args(args)
         .status()
         .map(|status| status.success())
         .unwrap_or(false);

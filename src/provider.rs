@@ -252,6 +252,19 @@ impl Provider {
             .and_then(|app| app.paths.iter().find(|p| p.exists()).cloned())
     }
 
+    /// Whether the login happens inside the desktop app (there is no CLI
+    /// login command), rather than the app merely sharing the CLI's login.
+    pub fn login_in_app(&self) -> bool {
+        self.app.is_some() && self.login.is_none()
+    }
+
+    /// Whether the provider's desktop app is installed, if it has one.
+    pub fn app_installed(&self) -> bool {
+        self.app
+            .as_ref()
+            .is_some_and(|app| app.paths.iter().any(|p| p.exists()))
+    }
+
     pub fn logged_in(&self, ctx: &Ctx) -> bool {
         self.artifacts
             .iter()
@@ -375,6 +388,32 @@ fn claude_desktop(ctx: &Ctx) -> Provider {
     }
 }
 
+/// The Codex desktop app (installed as ChatGPT.app, formerly Codex.app). It
+/// runs its own Codex app server, which reads the same `auth.json` and keeps
+/// the login in memory, so it is closed while that file is swapped.
+fn codex_app(ctx: &Ctx) -> AppInfo {
+    let paths: Vec<PathBuf> = ["ChatGPT.app", "Codex.app"]
+        .iter()
+        .flat_map(|app| {
+            [
+                PathBuf::from("/Applications").join(app),
+                ctx.home.join("Applications").join(app),
+            ]
+        })
+        .collect();
+    let name = paths
+        .iter()
+        .find(|p| p.exists())
+        .and_then(|p| p.file_stem())
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "ChatGPT".into());
+    AppInfo {
+        bundle_id: "com.openai.codex".into(),
+        name,
+        paths,
+    }
+}
+
 /// OpenAI Codex CLI: everything is in `$CODEX_HOME/auth.json`.
 fn codex(ctx: &Ctx) -> Provider {
     let home = ctx.dir_from("CODEX_HOME", ctx.home.join(".codex"));
@@ -385,7 +424,7 @@ fn codex(ctx: &Ctx) -> Provider {
         binary: Some("codex".into()),
         login: command(&["codex", "login"]),
         install: Some("npm install -g @openai/codex".into()),
-        app: None,
+        app: Some(codex_app(ctx)),
         artifacts: vec![Artifact::file("auth.json", auth.clone(), true)],
         identity: vec![
             json_string(&auth, "email"),

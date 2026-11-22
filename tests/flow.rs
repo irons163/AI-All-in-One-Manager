@@ -624,3 +624,101 @@ fn desktop_backfills_the_email_of_an_inactive_account_from_its_snapshot() {
     let codex = get(&ctx, "codex");
     assert_eq!(ops::backfill_label(&ctx, &codex, "nobody").unwrap(), None);
 }
+
+// ---- Codex desktop app (shares the CLI's auth.json) --------------------------
+
+const CODEX_BUNDLE: &str = "com.openai.codex";
+
+#[test]
+fn codex_switch_closes_and_reopens_the_codex_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let ctx = desktop_ctx(home, true, false);
+    let codex = get(&ctx, "codex");
+    assert!(!codex.login_in_app(), "Codex still logs in with its CLI");
+
+    codex_login(home, "a@x.io", "a1");
+    ops::save(&ctx, &codex, "a", false, None).unwrap();
+    codex_login(home, "b@x.io", "b1");
+    ops::save(&ctx, &codex, "b", false, None).unwrap();
+    assert!(ctx.apps.log().is_empty(), "saving never closes the app");
+
+    let report = ops::switch(&ctx, &codex, "a", false).unwrap();
+    assert_eq!(read(&codex_auth(home))["email"], "a@x.io");
+    assert_eq!(
+        ctx.apps.log(),
+        [format!("quit {CODEX_BUNDLE}"), format!("launch {CODEX_BUNDLE}")]
+    );
+    assert_eq!(report.restarted_app.as_deref(), Some("ChatGPT"));
+
+    // Already on "a": nothing to do, so the app is left alone.
+    assert!(ops::switch(&ctx, &codex, "a", false).unwrap().already_active);
+    assert_eq!(ctx.apps.log().len(), 2);
+}
+
+#[test]
+fn codex_switch_with_the_app_closed_does_not_start_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let ctx = desktop_ctx(home, false, false);
+    let codex = get(&ctx, "codex");
+    codex_login(home, "a@x.io", "a1");
+    ops::save(&ctx, &codex, "a", false, None).unwrap();
+    codex_login(home, "b@x.io", "b1");
+    ops::save(&ctx, &codex, "b", false, None).unwrap();
+
+    let report = ops::switch(&ctx, &codex, "a", false).unwrap();
+    assert_eq!(read(&codex_auth(home))["email"], "a@x.io");
+    assert!(ctx.apps.log().is_empty());
+    assert!(report.restarted_app.is_none());
+}
+
+#[test]
+fn codex_switch_changes_nothing_when_the_app_will_not_quit() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let mut ctx = desktop_ctx(home, true, true);
+    ctx.set_var("AIOM_QUIT_TIMEOUT_SECS", "1");
+    let codex = get(&ctx, "codex");
+    codex_login(home, "a@x.io", "a1");
+    ops::save(&ctx, &codex, "a", false, None).unwrap();
+    codex_login(home, "b@x.io", "b1");
+    ops::save(&ctx, &codex, "b", false, None).unwrap();
+
+    assert!(ops::switch(&ctx, &codex, "a", false).is_err());
+    assert_eq!(read(&codex_auth(home))["email"], "b@x.io");
+    assert_eq!(store::active(&ctx, "codex").unwrap().as_deref(), Some("b"));
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_login_keeps_the_app_closed_until_it_is_done() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let mut ctx = desktop_ctx(home, true, false);
+    let bin = home.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("codex");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s' '{{\"email\":\"new@x.io\",\"tokens\":{{\"access_token\":\"n1\"}}}}' > '{}'\n",
+            codex_auth(home).display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    ctx.set_var("PATH", &bin.display().to_string());
+    let codex = get(&ctx, "codex");
+    codex_login(home, "old@x.io", "o1");
+    ops::save(&ctx, &codex, "old", false, None).unwrap();
+
+    let (meta, _) = ops::login(&ctx, &codex, "new", false).unwrap();
+    assert_eq!(meta.identity.as_deref(), Some("new@x.io"));
+    assert_eq!(
+        ctx.apps.log(),
+        [format!("quit {CODEX_BUNDLE}"), format!("launch {CODEX_BUNDLE}")]
+    );
+    assert_eq!(store::active(&ctx, "codex").unwrap().as_deref(), Some("new"));
+}

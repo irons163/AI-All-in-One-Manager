@@ -55,6 +55,10 @@ aiom login claude-desktop work
 aiom use claude-desktop work
 ```
 
+### Codex App（ChatGPT.app）
+
+OpenAI 的 Codex 桌面 App（安裝後叫 **ChatGPT.app**，舊版叫 Codex.app）和 Codex CLI 共用 `~/.codex/auth.json`，並在執行中把登入留在記憶體。所以 Codex App 開著時，AIOM 切換 `codex` 帳號或用 `codex login` 登入新帳號，都會先正常關閉它，換好登入後再自動重新開啟；App 沒開就不會去開它。App 裡進行中的工作會被中斷，AIOM 會先跳出確認。第一次 macOS 會詢問是否允許 AIOM（或從終端機登入時的「終端機」）控制 ChatGPT，請按允許。在終端機裡執行中的 `codex` 工作階段仍要自己重新啟動。
+
 App 從 Finder 啟動時會向登入 shell 詢問 `PATH`，因此裝在 `~/.local/bin`、Homebrew、npm、cargo 等位置的 CLI 都找得到。
 
 想先看介面而不碰任何真實登入，可以用瀏覽器開啟示範模式（假資料）：
@@ -133,7 +137,7 @@ provider 名稱可以只打唯一的前綴，例如 `aiom use cl work` 等同 `a
 | --- | --- | --- |
 | `claude-desktop` | Claude 桌面 App 的登入（見上方「Claude 桌面 App」），切換時會關閉並重新開啟 Claude | — |
 | `claude` | macOS：Keychain 的 `Claude Code-credentials`；其他系統：`~/.claude/.credentials.json`。另外加上 `~/.claude.json` 裡的 `oauthAccount` 欄位（檔案其他內容不動） | `CLAUDE_CONFIG_DIR` |
-| `codex` | `~/.codex/auth.json` | `CODEX_HOME` |
+| `codex` | `~/.codex/auth.json`（Codex App 也用這份，見上方「Codex App」），Codex App 執行中時切換會關閉並重新開啟它 | `CODEX_HOME` |
 | `gemini` | `~/.gemini/oauth_creds.json`、`google_accounts.json`、`.env`、`settings.json` 裡的認證方式欄位；macOS 另含 Keychain 的 `gemini-cli-oauth` | `GEMINI_CLI_HOME` |
 | `grok` | `~/.grok/auth.json` | `GROK_HOME` |
 | `opencode` | `~/.local/share/opencode/auth.json` | `XDG_DATA_HOME` |

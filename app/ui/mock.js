@@ -26,7 +26,7 @@
     },
     {
       id: 'claude-desktop', name: 'Claude Desktop', builtin: true, cli: null, cli_installed: true,
-      app: 'Claude', app_running: true,
+      app: 'Claude', app_login: true, app_installed: true, app_running: true,
       logged_in: true, live_identity: '0e58fc24-9663-4eba-a2f5-04424cd4a921', active: 'main', matches_active: true,
       accounts: [
         account('main', '0e58fc24-9663-4eba-a2f5-04424cd4a921', '個人', 7200, true),
@@ -42,6 +42,7 @@
     },
     {
       id: 'codex', name: 'Codex CLI', builtin: true, cli: 'codex', cli_installed: true,
+      app: 'ChatGPT', app_login: false, app_installed: true, app_running: true,
       logged_in: true, live_identity: 'someone@new.example', active: null, matches_active: false,
       accounts: [],
       artifacts: [{ location: '~/.codex/auth.json', primary: true, present: true }],

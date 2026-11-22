@@ -145,8 +145,13 @@ struct ProviderView {
     install: Option<String>,
     /// Whether "restore" has anything to put back.
     has_backup: bool,
-    /// Name of the desktop app this provider's login belongs to, if any.
+    /// Name of the desktop app that uses this provider's login, if any.
     app: Option<String>,
+    /// Whether the login itself happens in that app (Claude Desktop), rather
+    /// than the app sharing the CLI's login (Codex).
+    app_login: bool,
+    /// Whether that app is installed.
+    app_installed: bool,
     /// Whether that app is running now.
     app_running: bool,
 }
@@ -205,6 +210,8 @@ fn provider_view(ctx: &Ctx, p: &Provider) -> Result<ProviderView> {
         install: p.install.clone(),
         has_backup: ops::has_backup(ctx, p),
         app: p.app.as_ref().map(|a| a.name.clone()),
+        app_login: p.login_in_app(),
+        app_installed: p.app_installed(),
         app_running: p
             .app
             .as_ref()
@@ -229,10 +236,13 @@ fn switch_outcome(ctx: &Ctx, p: &Provider, report: ops::SwitchReport) -> Outcome
         if let (true, Some(from)) = (report.synced, &report.from) {
             text.push_str(&format!("，並先保存了「{from}」的最新憑證"));
         }
-        match (&report.restarted_app, &p.app) {
-            (Some(app), _) => text.push_str(&format!("。{app} 已關閉並重新開啟。")),
-            (None, Some(_)) => text.push('。'),
-            (None, None) => text.push_str(&format!("。請重新啟動執行中的 {}。", p.name)),
+        if let Some(app) = &report.restarted_app {
+            text.push_str(&format!("。{app} 已關閉並重新開啟"));
+        }
+        if p.login_in_app() {
+            text.push('。');
+        } else {
+            text.push_str(&format!("。請重新啟動執行中的 {}。", p.name));
         }
         text
     };

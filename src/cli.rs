@@ -319,10 +319,11 @@ fn print_switch(ctx: &Ctx, p: &Provider, report: &SwitchReport, paint: &Paint) {
             println!("    saved the latest tokens of '{from}' first");
         }
     }
-    match &report.restarted_app {
-        Some(app) => println!("    {app} was closed for the switch and has been started again"),
-        None if p.app.is_some() => {}
-        None => println!("    restart any running {} session to pick up the change", p.name),
+    if let Some(app) = &report.restarted_app {
+        println!("    {app} was closed for the switch and has been started again");
+    }
+    if !p.login_in_app() {
+        println!("    restart any running {} session to pick up the change", p.name);
     }
 }
 
