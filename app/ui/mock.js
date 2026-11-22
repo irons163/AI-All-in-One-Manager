@@ -162,7 +162,10 @@
         ? { name: a.name, active: a.active, state: 'expired' }
         : {
           name: a.name, active: a.active, state: 'ok',
-          usage: { plan: 'plus', windows: demo[i % 2], limit_reached: demo[i % 2][1].used_percent >= 100 },
+          usage: {
+            plan: 'plus', windows: demo[i % 2], limit_reached: demo[i % 2][1].used_percent >= 100,
+            reset_vouchers: { available: i + 1, usable_now: demo[i % 2][1].used_percent >= 100 ? 1 : 0 },
+          },
         }));
     },
 

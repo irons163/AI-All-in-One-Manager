@@ -755,7 +755,8 @@ fn usage_server(requests: usize) -> (String, std::thread::JoinHandle<Vec<String>
                 "a1" => ("200 OK", json!({"plan_type": "plus", "rate_limit": {"limit_reached": false,
                     "primary_window": {"used_percent": 25, "limit_window_seconds": 18000, "reset_at": 5000}}})),
                 "b2" => ("200 OK", json!({"plan_type": "pro", "rate_limit": {"limit_reached": true,
-                    "secondary_window": {"used_percent": 100, "limit_window_seconds": 604800, "reset_at": 9000}}})),
+                    "secondary_window": {"used_percent": 100, "limit_window_seconds": 604800, "reset_at": 9000}},
+                    "rate_limit_reset_credits": {"available_count": 2, "applicable_available_count": 1}})),
                 _ => ("401 Unauthorized", json!({"error": "bad token"})),
             };
             let body = body.to_string();
@@ -807,6 +808,8 @@ fn usage_uses_the_freshest_login_of_each_account() {
     assert!(by_name("b").active);
     let AccountUsage::Ok { usage: b } = &by_name("b").usage else { panic!("b: {:?}", by_name("b")) };
     assert!(b.limit_reached);
+    assert_eq!(b.reset_vouchers.map(|v| (v.available, v.usable_now)), Some((2, 1)));
+    assert_eq!(a.reset_vouchers, None);
     assert_eq!(b.windows[0].minutes, 10_080);
 
     assert_eq!(by_name("c").usage, AccountUsage::Expired);

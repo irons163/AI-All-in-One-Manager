@@ -355,6 +355,13 @@ fn cmd_usage(ctx: &Ctx, providers: &[&Provider], paint: &Paint, explicit: bool) 
                     let colour = if usage.limit_reached { Some("31") } else { None };
                     let text = if windows.is_empty() { "no limits reported".into() } else { windows.join("; ") };
                     row.push((text, colour));
+                    row.push(match usage.reset_vouchers {
+                        Some(v) if v.usable_now > 0 => {
+                            (format!("{} ({} usable now)", v.available, v.usable_now), Some("32"))
+                        }
+                        Some(v) => (v.available.to_string(), None),
+                        None => ("-".into(), None),
+                    });
                 }
                 AccountUsage::Expired => {
                     row.push(("-".into(), None));
@@ -371,7 +378,7 @@ fn cmd_usage(ctx: &Ctx, providers: &[&Provider], paint: &Paint, explicit: bool) 
             }
             rows.push(row);
         }
-        print_table(paint, &["", "ACCOUNT", "PLAN", "USED"], &rows);
+        print_table(paint, &["", "ACCOUNT", "PLAN", "USED", "RESET VOUCHERS"], &rows);
     }
     if !shown && !explicit {
         println!("No saved accounts of a provider that reports usage (currently: codex).");

@@ -265,7 +265,13 @@ function drawUsage(p, a) {
         ${reset}
       </div>`;
   }).join('');
-  const chips = plan || out ? `<div class="chips">${plan}${out}</div>` : '';
+  const v = u.reset_vouchers;
+  const vouchers = v && v.available
+    ? (v.usable_now
+      ? `<span class="chip ok" title="在 Codex App 裡使用重置券，可以重置已用完的額度">重置券 ${v.available} 張・現在可用 ${v.usable_now} 張</span>`
+      : `<span class="chip" title="額度用完時，可以在 Codex App 裡用重置券重置額度">重置券 ${v.available} 張</span>`)
+    : '';
+  const chips = plan || out || vouchers ? `<div class="chips">${plan}${out}${vouchers}</div>` : '';
   return `<div class="usage">${chips}${windows || '<span class="muted">沒有回報額度限制</span>'}</div>`;
 }
 

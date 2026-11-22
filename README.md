@@ -181,16 +181,16 @@ jwt_claim = "email"          # 省略 jwt_claim 則直接取該欄位的字串
 
 ## 使用額度
 
-AIOM 可以顯示每個 **Codex** 帳號的 5 小時與每週額度：已用百分比、何時重置、方案（Plus、Pro…），用完的帳號會標示「額度已用完」，方便挑還有額度的帳號切換。
+AIOM 可以顯示每個 **Codex** 帳號的 5 小時與每週額度：已用百分比、何時重置、方案（Plus、Pro…），以及持有幾張**重置券**（額度用完時可在 Codex App 裡用來重置額度；「現在可用」表示這個帳號此刻就能用）。用完的帳號會標示「額度已用完」，方便挑還有額度的帳號切換。AIOM 只顯示重置券，不會替你使用。
 
 - 視窗：打開「Codex」頁就會自動查詢，結果保留 5 分鐘；按「已儲存的帳號」右邊的「更新額度」可立即重新查詢。
 - 命令列：`aiom usage` 或 `aiom usage codex`。
 
 ```text
 codex (Codex)
-   ACCOUNT   PLAN  USED
-*  work      plus  5h 12%, resets in 2h 59m; week 41%, resets in 2d 23h
-   personal  plus  5h 0%, resets in 5h 0m; week 100%, resets in 19h 59m
+   ACCOUNT   PLAN  USED                                                   RESET VOUCHERS
+*  work      plus  5h 12%, resets in 2h 59m; week 41%, resets in 2d 23h  2
+   personal  plus  5h 0%, resets in 5h 0m; week 100%, resets in 19h 59m  1 (usable now)
 ```
 
 做法和 Codex CLI 與 Codex App 顯示額度時相同：用該帳號的登入向 `https://chatgpt.com/backend-api/wham/usage` 查詢。

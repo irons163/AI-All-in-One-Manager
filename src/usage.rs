@@ -32,6 +32,16 @@ pub struct Usage {
     pub windows: Vec<Window>,
     /// Whether the account is out of quota right now.
     pub limit_reached: bool,
+    /// Rate-limit reset vouchers the account holds: each one resets a used
+    /// up limit once (redeemed in the Codex app).
+    pub reset_vouchers: Option<Vouchers>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Vouchers {
+    pub available: u64,
+    /// How many can be used right now (only when a limit is used up).
+    pub usable_now: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -203,10 +213,15 @@ pub fn parse_codex(json: &Value) -> Usage {
             })
         })
         .collect();
+    let credits = &json["rate_limit_reset_credits"];
     Usage {
         plan: json["plan_type"].as_str().map(str::to_string),
         windows,
         limit_reached: limits["limit_reached"].as_bool().unwrap_or(false),
+        reset_vouchers: credits["available_count"].as_u64().map(|available| Vouchers {
+            available,
+            usable_now: credits["applicable_available_count"].as_u64().unwrap_or(0),
+        }),
     }
 }
 
@@ -250,8 +265,10 @@ mod tests {
                 "limit_reached": true,
                 "primary_window": {"used_percent": 12, "limit_window_seconds": 18000, "reset_at": 100},
                 "secondary_window": {"used_percent": 100, "limit_window_seconds": 604800, "reset_at": 200}
-            }
+            },
+            "rate_limit_reset_credits": {"available_count": 3, "applicable_available_count": 1}
         }));
+        assert_eq!(usage.reset_vouchers, Some(Vouchers { available: 3, usable_now: 1 }));
         assert_eq!(usage.plan.as_deref(), Some("plus"));
         assert!(usage.limit_reached);
         assert_eq!(
@@ -263,6 +280,7 @@ mod tests {
         );
         let empty = parse_codex(&json!({"plan_type": "free", "rate_limit": {"secondary_window": null}}));
         assert!(empty.windows.is_empty() && !empty.limit_reached);
+        assert_eq!(empty.reset_vouchers, None);
     }
 
     #[test]
