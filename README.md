@@ -34,7 +34,26 @@ App 的畫面：
 - 視窗回到前景時會自動重新整理，所以在終端機做的變更也會反映出來。
 - 有按鈕不能按時，工具列下方會列出每個按鈕停用的原因。最常見的是該 CLI 還沒安裝，這時會一併顯示安裝指令。
 
-注意：AIOM 管理的是各家**命令列工具**的登入。Claude 桌面 App 自己的登入是分開的，要管理 Claude 的帳號需要另外安裝 Claude Code CLI（`claude` 指令）。
+### Claude 桌面 App（`claude-desktop`）
+
+除了命令列工具，AIOM 也能切換 **Claude 桌面 App** 本身的帳號，不需要安裝任何 CLI。它和 Claude Code CLI（`claude`）的登入是分開的兩回事，在 AIOM 裡也是兩個 provider。
+
+- **切換時會先關閉 Claude**：App 執行中會把登入留在記憶體並在結束時寫回，所以 AIOM 會正常關閉 Claude、備份並替換登入資料，再自動重新開啟。Claude 裡進行中的對話與工作會被中斷（包括在 Claude 裡執行的 Claude Code 工作階段），重新開啟後可從側邊欄接回。AIOM 會先跳出確認。
+- **登入新帳號**：AIOM 會備份目前的登入、登出並重新開啟 Claude；你在 Claude 裡登入另一個帳號後回到 AIOM，就會自動存成你取的名稱。
+- **第一次切換時 macOS 會詢問**是否允許 AIOM 控制 Claude（「自動化」權限），請按允許。若曾拒絕，可到「系統設定 → 隱私權與安全性 → 自動化」開啟。
+- **管理的內容**：`~/Library/Application Support/Claude/` 底下 `config.json` 的 `oauth:tokenCacheV2`、`oauth:tokenCache`、`lastKnownAccountUuid` 欄位、`Cookies`，以及 `Local Storage`、`Session Storage`、`IndexedDB`、`WebStorage` 資料夾。MCP 設定、擴充功能、工作階段等其他資料都不會動。
+- 這些資料由這台 Mac 鑰匙圈裡的「Claude Safe Storage」金鑰加密，所以存檔只能在同一台 Mac 上使用，搬到別台無效。
+- 帳號以 Claude 的帳號 ID 辨識（畫面上顯示為「帳號 ID 0e58fc24…」），建議存檔時取好認的名稱。
+
+命令列也可以操作：
+
+```bash
+aiom login claude-desktop work
+```
+
+```bash
+aiom use claude-desktop work
+```
 
 App 從 Finder 啟動時會向登入 shell 詢問 `PATH`，因此裝在 `~/.local/bin`、Homebrew、npm、cargo 等位置的 CLI 都找得到。
 
@@ -112,6 +131,7 @@ provider 名稱可以只打唯一的前綴，例如 `aiom use cl work` 等同 `a
 
 | Provider | 管理的內容 | 路徑可由環境變數改變 |
 | --- | --- | --- |
+| `claude-desktop` | Claude 桌面 App 的登入（見上方「Claude 桌面 App」），切換時會關閉並重新開啟 Claude | — |
 | `claude` | macOS：Keychain 的 `Claude Code-credentials`；其他系統：`~/.claude/.credentials.json`。另外加上 `~/.claude.json` 裡的 `oauthAccount` 欄位（檔案其他內容不動） | `CLAUDE_CONFIG_DIR` |
 | `codex` | `~/.codex/auth.json` | `CODEX_HOME` |
 | `gemini` | `~/.gemini/oauth_creds.json`、`google_accounts.json`、`.env`、`settings.json` 裡的認證方式欄位；macOS 另含 Keychain 的 `gemini-cli-oauth` | `GEMINI_CLI_HOME` |

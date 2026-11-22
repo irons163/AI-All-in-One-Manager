@@ -6,6 +6,7 @@
 //! named snapshot of those artifacts; switching swaps the live artifacts for
 //! the snapshot.
 
+pub mod apps;
 pub mod artifact;
 pub mod cli;
 pub mod ctx;

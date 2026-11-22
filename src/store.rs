@@ -40,6 +40,10 @@ pub struct Meta {
 pub struct State {
     #[serde(default)]
     pub active: BTreeMap<String, String>,
+    /// Name the user chose for the next account of a provider, used when a
+    /// login that happens elsewhere (inside a desktop app) is saved.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending: BTreeMap<String, String>,
 }
 
 /// Where one snapshot lives: a directory for file-like artifacts and a
@@ -145,6 +149,19 @@ pub fn active(ctx: &Ctx, provider: &str) -> Result<Option<String>> {
         Some(name) if load_meta(ctx, provider, name)?.is_some() => Ok(Some(name.clone())),
         _ => Ok(None),
     }
+}
+
+pub fn set_pending(ctx: &Ctx, provider: &str, name: Option<&str>) -> Result<()> {
+    let mut state = load_state(ctx)?;
+    match name {
+        Some(name) => {
+            state.pending.insert(provider.to_string(), name.to_string());
+        }
+        None => {
+            state.pending.remove(provider);
+        }
+    }
+    save_state(ctx, &state)
 }
 
 pub fn set_active(ctx: &Ctx, provider: &str, name: Option<&str>) -> Result<()> {

@@ -313,7 +313,51 @@ fn print_switch(ctx: &Ctx, p: &Provider, report: &SwitchReport, paint: &Paint) {
             println!("    saved the latest tokens of '{from}' first");
         }
     }
-    println!("    restart any running {} session to pick up the change", p.name);
+    match &report.restarted_app {
+        Some(app) => println!("    {app} was closed for the switch and has been started again"),
+        None if p.app.is_some() => {}
+        None => println!("    restart any running {} session to pick up the change", p.name),
+    }
+}
+
+/// `aiom login` for a provider whose login happens inside its desktop app:
+/// sign the app out, wait for the user to sign in there, then save.
+fn login_in_app(ctx: &Ctx, p: &Provider, name: &str, paint: &Paint) -> Result<()> {
+    let app = p.app.as_ref().expect("checked by caller");
+    println!(
+        "Closing {} to sign it out; the current login is backed up first.",
+        app.name
+    );
+    for warning in ops::app_logout(ctx, p, Some(name))? {
+        eprintln!("{} {}", paint.yellow("warning:"), ctx.tilde(&warning));
+    }
+    println!(
+        "{} is open again. Sign in to the other account there; this waits up to 15 minutes (Ctrl+C to stop).",
+        app.name
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    while !p.logged_in(ctx) {
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "no sign-in yet; after signing in to {}, run `aiom adopt {}` to save it as '{name}'",
+                app.name,
+                p.id
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    // Give the app a moment to finish writing everything that belongs to the login.
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    match ops::adopt(ctx, p)? {
+        Some(adopted) => println!(
+            "{} signed in and saved {} account '{}'",
+            paint.green("ok:"),
+            p.name,
+            adopted.name
+        ),
+        None => println!("{} the new login is already a saved account", paint.green("ok:")),
+    }
+    Ok(())
 }
 
 fn pick_account(ctx: &Ctx, p: &Provider, paint: &Paint) -> Result<String> {
@@ -482,6 +526,12 @@ pub fn run(cli: Cli, ctx: &Ctx) -> Result<()> {
             force,
         } => {
             let p = get(&provider)?;
+            if p.app.is_some() && p.login.is_none() {
+                if force {
+                    bail!("--force is not supported for {}; rename or remove the existing account first", p.name);
+                }
+                return login_in_app(ctx, p, &name, &paint);
+            }
             let (meta, warnings) = ops::login(ctx, p, &name, force)?;
             for warning in &warnings {
                 eprintln!("{} {}", paint.yellow("warning:"), ctx.tilde(warning));

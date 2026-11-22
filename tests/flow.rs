@@ -371,3 +371,172 @@ fn adopt_recognises_identity_less_logins_by_content() {
     assert_eq!(third.name, "account-2");
     assert_eq!(store::list(&ctx, "opencode").unwrap().len(), 3);
 }
+
+// ---- Claude desktop app ------------------------------------------------------
+
+use aiom::apps::FakeApps;
+
+const BUNDLE: &str = "com.anthropic.claudefordesktop";
+
+fn desktop_dir(home: &Path) -> PathBuf {
+    home.join("Library/Application Support/Claude")
+}
+
+/// Lay out a signed-in Claude desktop profile for account `who`.
+fn desktop_login(home: &Path, who: &str, startups: u32) {
+    let dir = desktop_dir(home);
+    write(
+        &dir.join("config.json"),
+        &json!({
+            "locale": "zh-TW",
+            "launches": startups,
+            "lastKnownAccountUuid": format!("uuid-{who}"),
+            "oauth:tokenCacheV2": format!("djEw-v2-{who}"),
+            "oauth:tokenCache": format!("djEw-v1-{who}"),
+            "userThemeMode": "dark"
+        }),
+    );
+    fs::write(dir.join("Cookies"), format!("sqlite cookies of {who}")).unwrap();
+    let ls = dir.join("Local Storage/leveldb");
+    let _ = fs::remove_dir_all(dir.join("Local Storage"));
+    fs::create_dir_all(&ls).unwrap();
+    fs::write(ls.join("000003.log"), format!("local storage of {who}")).unwrap();
+    let idb = dir.join("IndexedDB/https_claude.ai_0.indexeddb.leveldb");
+    let _ = fs::remove_dir_all(dir.join("IndexedDB"));
+    fs::create_dir_all(&idb).unwrap();
+    fs::write(idb.join("CURRENT"), format!("idb of {who}")).unwrap();
+    // Not part of the login: must never be touched.
+    fs::create_dir_all(dir.join("claude-code-sessions")).unwrap();
+    fs::write(dir.join("claude_desktop_config.json"), "{\"mcpServers\":{}}").unwrap();
+}
+
+fn desktop_ctx(home: &Path, running: bool, refuse_quit: bool) -> Ctx {
+    let mut ctx = Ctx::for_test(home, false);
+    let apps = FakeApps::default();
+    apps.running.set(running);
+    apps.refuse_quit.set(refuse_quit);
+    ctx.apps = Box::new(apps);
+    ctx
+}
+
+fn who_is_live(home: &Path) -> String {
+    let dir = desktop_dir(home);
+    let config = read(&dir.join("config.json"));
+    let cookies = fs::read_to_string(dir.join("Cookies")).unwrap();
+    let ls = fs::read_to_string(dir.join("Local Storage/leveldb/000003.log")).unwrap();
+    let idb = fs::read_to_string(dir.join("IndexedDB/https_claude.ai_0.indexeddb.leveldb/CURRENT")).unwrap();
+    let who = config["lastKnownAccountUuid"].as_str().unwrap().trim_start_matches("uuid-").to_string();
+    assert_eq!(config["oauth:tokenCacheV2"], format!("djEw-v2-{who}"));
+    assert_eq!(cookies, format!("sqlite cookies of {who}"));
+    assert_eq!(ls, format!("local storage of {who}"));
+    assert_eq!(idb, format!("idb of {who}"));
+    who
+}
+
+#[test]
+fn desktop_switch_closes_swaps_and_reopens_the_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let ctx = desktop_ctx(home, true, false);
+    let desktop = get(&ctx, "claude-desktop");
+
+    desktop_login(home, "alice", 1);
+    let a = ops::adopt(&ctx, &desktop).unwrap().unwrap();
+    assert_eq!(a.name, "account", "a UUID does not make a name");
+    assert_eq!(a.identity.as_deref(), Some("uuid-alice"));
+    ops::rename(&ctx, &desktop, "account", "alice").unwrap();
+
+    desktop_login(home, "bob", 2);
+    ops::save(&ctx, &desktop, "bob", false, None).unwrap();
+    assert!(ctx.apps.log().is_empty(), "saving never closes the app");
+
+    // The app keeps working on bob and writes unrelated settings meanwhile.
+    let mut config = read(&desktop_dir(home).join("config.json"));
+    config["userThemeMode"] = json!("light");
+    write(&desktop_dir(home).join("config.json"), &config);
+
+    let report = ops::switch(&ctx, &desktop, "alice", false).unwrap();
+    assert_eq!(ctx.apps.log(), [format!("quit {BUNDLE}"), format!("launch {BUNDLE}")]);
+    assert_eq!(report.restarted_app.as_deref(), Some("Claude"));
+    assert!(report.synced);
+    assert_eq!(who_is_live(home), "alice");
+    let config = read(&desktop_dir(home).join("config.json"));
+    assert_eq!(config["userThemeMode"], "light", "settings outside the login stay as they are");
+    assert_eq!(config["launches"], 2);
+    assert!(desktop_dir(home).join("claude-code-sessions").is_dir());
+    assert_eq!(
+        fs::read_to_string(desktop_dir(home).join("claude_desktop_config.json")).unwrap(),
+        "{\"mcpServers\":{}}"
+    );
+
+    ops::switch(&ctx, &desktop, "bob", false).unwrap();
+    assert_eq!(who_is_live(home), "bob");
+
+    // Already on bob: nothing is closed.
+    let before = ctx.apps.log().len();
+    assert!(ops::switch(&ctx, &desktop, "bob", false).unwrap().already_active);
+    assert_eq!(ctx.apps.log().len(), before);
+}
+
+#[test]
+fn desktop_switch_changes_nothing_when_the_app_will_not_quit() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let ctx = desktop_ctx(home, false, false);
+    let desktop = get(&ctx, "claude-desktop");
+    desktop_login(home, "alice", 1);
+    ops::save(&ctx, &desktop, "alice", false, None).unwrap();
+    desktop_login(home, "bob", 1);
+    ops::save(&ctx, &desktop, "bob", false, None).unwrap();
+
+    // Not running: switched without starting it.
+    ops::switch(&ctx, &desktop, "alice", false).unwrap();
+    assert!(ctx.apps.log().is_empty());
+    assert_eq!(who_is_live(home), "alice");
+
+    let mut stubborn = desktop_ctx(home, true, true);
+    stubborn.set_var("AIOM_QUIT_TIMEOUT_SECS", "1");
+    let err = ops::switch(&stubborn, &desktop, "bob", false).unwrap_err();
+    assert!(format!("{err:#}").contains("did not quit"), "{err:#}");
+    assert!(format!("{err:#}").contains("nothing was changed"), "{err:#}");
+    assert_eq!(who_is_live(home), "alice", "the live login is untouched");
+    assert_eq!(store::active(&stubborn, "claude-desktop").unwrap().as_deref(), Some("alice"));
+    assert_eq!(stubborn.apps.log(), [format!("quit {BUNDLE}")], "not restarted either");
+}
+
+#[test]
+fn desktop_logout_makes_room_for_a_new_named_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    // The app has to be "installed" for a logout to be offered.
+    let mut ctx = desktop_ctx(home, true, false);
+    fs::create_dir_all(home.join("Applications/Claude.app")).unwrap();
+    ctx.set_var("PATH", "/usr/bin");
+    let desktop = get(&ctx, "claude-desktop");
+
+    desktop_login(home, "alice", 1);
+    ops::save(&ctx, &desktop, "alice", false, None).unwrap();
+    assert!(ops::app_logout(&ctx, &desktop, Some("alice")).is_err(), "name taken");
+
+    ops::app_logout(&ctx, &desktop, Some("work")).unwrap();
+    assert_eq!(ctx.apps.log(), [format!("quit {BUNDLE}"), format!("launch {BUNDLE}")]);
+    let d = desktop_dir(home);
+    assert!(!d.join("Cookies").exists());
+    assert!(!d.join("Local Storage").exists());
+    let config = read(&d.join("config.json"));
+    assert!(config.get("oauth:tokenCacheV2").is_none());
+    assert_eq!(config["locale"], "zh-TW", "only the login is cleared");
+    assert!(!desktop.logged_in(&ctx));
+    assert_eq!(store::active(&ctx, "claude-desktop").unwrap(), None);
+
+    // The user signs in to another account inside the app.
+    desktop_login(home, "carol", 1);
+    let saved = ops::adopt(&ctx, &desktop).unwrap().unwrap();
+    assert_eq!(saved.name, "work", "the name chosen beforehand is used");
+    assert!(store::load_state(&ctx).unwrap().pending.is_empty());
+
+    ops::switch(&ctx, &desktop, "alice", false).unwrap();
+    assert_eq!(who_is_live(home), "alice");
+    ops::switch(&ctx, &desktop, "work", false).unwrap();
+    assert_eq!(who_is_live(home), "carol");
+}

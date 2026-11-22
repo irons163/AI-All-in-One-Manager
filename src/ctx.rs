@@ -2,6 +2,7 @@
 //! variables, the OS secret store) goes through `Ctx`, so tests can point the
 //! whole program at a throwaway directory.
 
+use crate::apps::{AppRunner, FakeApps, MacApps, NoApps};
 use crate::secrets::{MacKeychain, MemoryStore, NoStore, SecretStore};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -16,6 +17,8 @@ pub struct Ctx {
     /// Whether providers that use the OS keychain should be read from it.
     pub keychain: bool,
     pub secrets: Box<dyn SecretStore>,
+    /// Quits and starts desktop apps whose login is swapped.
+    pub apps: Box<dyn AppRunner>,
     vars: HashMap<String, String>,
 }
 
@@ -45,18 +48,26 @@ impl Ctx {
         } else {
             Box::new(NoStore)
         };
+        let apps: Box<dyn AppRunner> =
+            if cfg!(target_os = "macos") && !vars.contains_key("AIOM_NO_APP_CONTROL") {
+                Box::new(MacApps)
+            } else {
+                Box::new(NoApps)
+            };
         Ok(Ctx {
             home,
             data_dir,
             user,
             keychain,
             secrets,
+            apps,
             vars,
         })
     }
 
-    /// A context rooted in `home` with an in-memory secret store and no
-    /// inherited environment. Never touches the real home or keychain.
+    /// A context rooted in `home` with an in-memory secret store, a fake app
+    /// runner and no inherited environment. Never touches the real home,
+    /// keychain or running apps.
     pub fn for_test(home: &Path, keychain: bool) -> Self {
         Ctx {
             home: home.to_path_buf(),
@@ -64,6 +75,7 @@ impl Ctx {
             user: "tester".to_string(),
             keychain,
             secrets: Box::new(MemoryStore::default()),
+            apps: Box::new(FakeApps::default()),
             vars: HashMap::new(),
         }
     }

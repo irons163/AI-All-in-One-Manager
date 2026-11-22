@@ -141,6 +141,10 @@ struct ProviderView {
     install: Option<String>,
     /// Whether "restore" has anything to put back.
     has_backup: bool,
+    /// Name of the desktop app this provider's login belongs to, if any.
+    app: Option<String>,
+    /// Whether that app is running now.
+    app_running: bool,
 }
 
 #[derive(Serialize, Default)]
@@ -194,6 +198,12 @@ fn provider_view(ctx: &Ctx, p: &Provider) -> Result<ProviderView> {
         login_command: p.login.as_ref().map(|cmd| cmd.join(" ")),
         install: p.install.clone(),
         has_backup: ops::has_backup(ctx, p),
+        app: p.app.as_ref().map(|a| a.name.clone()),
+        app_running: p
+            .app
+            .as_ref()
+            .map(|a| ctx.apps.is_running(&a.bundle_id).unwrap_or(false))
+            .unwrap_or(false),
     })
 }
 
@@ -213,7 +223,11 @@ fn switch_outcome(ctx: &Ctx, p: &Provider, report: ops::SwitchReport) -> Outcome
         if let (true, Some(from)) = (report.synced, &report.from) {
             text.push_str(&format!("，並先保存了「{from}」的最新憑證"));
         }
-        text.push_str(&format!("。請重新啟動執行中的 {}。", p.name));
+        match (&report.restarted_app, &p.app) {
+            (Some(app), _) => text.push_str(&format!("。{app} 已關閉並重新開啟。")),
+            (None, Some(_)) => text.push('。'),
+            (None, None) => text.push_str(&format!("。請重新啟動執行中的 {}。", p.name)),
+        }
         text
     };
     Outcome {
@@ -390,6 +404,18 @@ fn start_login(provider: String, name: String, force: bool) -> Result<Outcome, S
     run(|ctx, providers| {
         let p = provider::find(providers, &provider)?;
         let name = name.trim();
+        if let (Some(app), None) = (&p.app, &p.login) {
+            // The login happens inside the app: sign it out and let the user
+            // sign in there; the window saves the new login when it appears.
+            let warnings = ops::app_logout(ctx, p, Some(name))?;
+            return Ok(Outcome {
+                message: format!(
+                    "已備份目前的登入並登出 {app}，{app} 已重新開啟。請在 {app} 裡登入另一個帳號，完成後回到 AIOM，會自動存成「{name}」。",
+                    app = app.name
+                ),
+                warnings: warnings.iter().map(|w| ctx.tilde(w)).collect(),
+            });
+        }
         store::validate_name(name)?;
         if store::load_meta(ctx, &p.id, name)?.is_some() && !force {
             bail!("{} account '{name}' already exists", p.name);

@@ -46,6 +46,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAppleEventsUsageDescription</key><string>AIOM 切換 Claude 桌面 App 的帳號時，需要先關閉 Claude，完成後再重新開啟。</string>
 </dict>
 </plist>
 EOF

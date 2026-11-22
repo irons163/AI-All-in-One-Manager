@@ -1,7 +1,8 @@
 //! Provider definitions: which artifacts make up a login for each AI CLI,
 //! how to tell which account is logged in, and how to start a fresh login.
 //!
-//! Built-in: Claude Code, Codex, Gemini CLI, Grok, OpenCode. More can be
+//! Built-in: Claude Code, the Claude desktop app, Codex, Gemini CLI, Grok,
+//! OpenCode. More can be
 //! declared (or a built-in overridden) in `<data dir>/providers.toml`.
 
 use crate::artifact::Artifact;
@@ -23,10 +24,23 @@ pub struct Provider {
     pub login: Option<Vec<String>>,
     /// Shell command that installs the CLI, shown when it is missing.
     pub install: Option<String>,
+    /// Set for a desktop app whose login lives in its own files: the app is
+    /// quit before those files are replaced and started again afterwards.
+    pub app: Option<AppInfo>,
     pub artifacts: Vec<Artifact>,
     /// Tried in order; the first that yields a value names the live account.
     pub identity: Vec<IdentitySource>,
     pub builtin: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppInfo {
+    /// macOS bundle identifier, used to find, quit and start the app.
+    pub bundle_id: String,
+    /// Name to show, e.g. "Claude".
+    pub name: String,
+    /// Where the app may be installed.
+    pub paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +85,20 @@ impl Provider {
     /// Who is logged in right now, if the provider's files say.
     pub fn live_identity(&self) -> Option<String> {
         self.identity.iter().find_map(IdentitySource::resolve)
+    }
+
+    /// Where the provider's CLI or app is installed, if it is.
+    pub fn installed_path(&self, ctx: &Ctx) -> Option<PathBuf> {
+        if let Some(found) = self
+            .binary
+            .as_deref()
+            .and_then(|b| crate::util::find_in_path(b, ctx.var("PATH")))
+        {
+            return Some(found);
+        }
+        self.app
+            .as_ref()
+            .and_then(|app| app.paths.iter().find(|p| p.exists()).cloned())
     }
 
     pub fn logged_in(&self, ctx: &Ctx) -> bool {
@@ -136,8 +164,56 @@ fn claude(ctx: &Ctx) -> Provider {
         binary: Some("claude".into()),
         login: command(&["claude", "auth", "login"]),
         install: Some("npm install -g @anthropic-ai/claude-code".into()),
+        app: None,
         artifacts,
         identity: vec![json_string(&state_file, "oauthAccount.emailAddress")],
+        builtin: true,
+    }
+}
+
+/// The Claude desktop app (macOS). It keeps its login in its own data
+/// folder, separate from the Claude Code CLI: encrypted OAuth tokens in
+/// `config.json`, the claude.ai session cookie in `Cookies`, and the web
+/// app's local storage. Everything is encrypted with a key from the login
+/// keychain ("Claude Safe Storage") that is the same for every account on
+/// this Mac, so swapping the files swaps the account. The app must be closed
+/// while that happens.
+fn claude_desktop(ctx: &Ctx) -> Provider {
+    let dir = ctx
+        .home
+        .join("Library")
+        .join("Application Support")
+        .join("Claude");
+    let config = dir.join("config.json");
+    Provider {
+        id: "claude-desktop".into(),
+        name: "Claude Desktop".into(),
+        binary: None,
+        login: None,
+        install: None,
+        app: Some(AppInfo {
+            bundle_id: "com.anthropic.claudefordesktop".into(),
+            name: "Claude".into(),
+            paths: vec![
+                PathBuf::from("/Applications/Claude.app"),
+                ctx.home.join("Applications").join("Claude.app"),
+            ],
+        }),
+        artifacts: vec![
+            Artifact::json_keys(
+                "config-oauth",
+                config.clone(),
+                &["oauth:tokenCacheV2", "oauth:tokenCache"],
+                true,
+            ),
+            Artifact::json_keys("config-account", config.clone(), &["lastKnownAccountUuid"], false),
+            Artifact::file("Cookies", dir.join("Cookies"), false),
+            Artifact::dir("local-storage", dir.join("Local Storage"), false),
+            Artifact::dir("session-storage", dir.join("Session Storage"), false),
+            Artifact::dir("indexeddb", dir.join("IndexedDB"), false),
+            Artifact::dir("webstorage", dir.join("WebStorage"), false),
+        ],
+        identity: vec![json_string(&config, "lastKnownAccountUuid")],
         builtin: true,
     }
 }
@@ -152,6 +228,7 @@ fn codex(ctx: &Ctx) -> Provider {
         binary: Some("codex".into()),
         login: command(&["codex", "login"]),
         install: Some("npm install -g @openai/codex".into()),
+        app: None,
         artifacts: vec![Artifact::file("auth.json", auth.clone(), true)],
         identity: vec![
             json_string(&auth, "email"),
@@ -198,6 +275,7 @@ fn gemini(ctx: &Ctx) -> Provider {
         binary: Some("gemini".into()),
         login: command(&["gemini"]),
         install: Some("npm install -g @google/gemini-cli".into()),
+        app: None,
         artifacts,
         identity: vec![json_string(&accounts, "active")],
         builtin: true,
@@ -214,6 +292,7 @@ fn grok(ctx: &Ctx) -> Provider {
         binary: Some("grok".into()),
         login: command(&["grok", "login"]),
         install: None,
+        app: None,
         artifacts: vec![Artifact::file("auth.json", auth.clone(), true)],
         identity: vec![
             json_string(&auth, "email"),
@@ -236,6 +315,7 @@ fn opencode(ctx: &Ctx) -> Provider {
         binary: Some("opencode".into()),
         login: command(&["opencode", "auth", "login"]),
         install: Some("npm install -g opencode-ai".into()),
+        app: None,
         artifacts: vec![Artifact::file(
             "auth.json",
             data.join("opencode").join("auth.json"),
@@ -247,7 +327,14 @@ fn opencode(ctx: &Ctx) -> Provider {
 }
 
 pub fn builtins(ctx: &Ctx) -> Vec<Provider> {
-    vec![claude(ctx), codex(ctx), gemini(ctx), grok(ctx), opencode(ctx)]
+    vec![
+        claude(ctx),
+        claude_desktop(ctx),
+        codex(ctx),
+        gemini(ctx),
+        grok(ctx),
+        opencode(ctx),
+    ]
 }
 
 // ---- user-defined providers -------------------------------------------------
@@ -267,10 +354,20 @@ struct CustomProvider {
     binary: Option<String>,
     login: Option<Vec<String>>,
     install: Option<String>,
+    app: Option<CustomApp>,
     #[serde(default)]
     artifact: Vec<CustomArtifact>,
     #[serde(default)]
     identity: Vec<CustomIdentity>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CustomApp {
+    bundle_id: String,
+    name: Option<String>,
+    #[serde(default)]
+    paths: Vec<String>,
 }
 
 fn yes() -> bool {
@@ -289,6 +386,12 @@ enum CustomArtifact {
     JsonKeys {
         path: String,
         keys: Vec<String>,
+        id: Option<String>,
+        #[serde(default)]
+        primary: bool,
+    },
+    Dir {
+        path: String,
         id: Option<String>,
         #[serde(default)]
         primary: bool,
@@ -378,6 +481,14 @@ fn build_custom(ctx: &Ctx, raw: CustomProvider) -> Result<Provider> {
                 let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
                 (id, fallback, Artifact::json_keys("", path, &keys, primary))
             }
+            CustomArtifact::Dir { path, id, primary } => {
+                let path = ctx.expand(&path);
+                let fallback = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                (id, fallback, Artifact::dir("", path, primary))
+            }
             CustomArtifact::Keychain {
                 service,
                 account,
@@ -427,6 +538,11 @@ fn build_custom(ctx: &Ctx, raw: CustomProvider) -> Result<Provider> {
         binary: raw.binary,
         login: raw.login.filter(|cmd| !cmd.is_empty()),
         install: raw.install.filter(|cmd| !cmd.trim().is_empty()),
+        app: raw.app.map(|app| AppInfo {
+            name: app.name.unwrap_or_else(|| app.bundle_id.clone()),
+            paths: app.paths.iter().map(|p| ctx.expand(p)).collect(),
+            bundle_id: app.bundle_id,
+        }),
         artifacts,
         identity,
         builtin: false,
@@ -540,7 +656,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Ctx::for_test(dir.path(), false);
         let providers = builtins(&ctx);
-        assert_eq!(find(&providers, "cl").unwrap().id, "claude");
+        assert_eq!(find(&providers, "claude").unwrap().id, "claude", "exact id wins over prefix");
+        assert_eq!(find(&providers, "claude-d").unwrap().id, "claude-desktop");
+        assert!(find(&providers, "cl").is_err(), "claude and claude-desktop both match");
         assert_eq!(find(&providers, "Codex").unwrap().id, "codex");
         assert!(find(&providers, "g").is_err(), "gemini and grok both match");
         assert!(find(&providers, "nope").is_err());
@@ -614,7 +732,7 @@ mod tests {
         )
         .unwrap();
         let providers = load_all(&ctx).unwrap();
-        assert_eq!(providers.len(), 5);
+        assert_eq!(providers.len(), 6);
         let grok = find(&providers, "grok").unwrap();
         assert!(!grok.builtin);
         assert!(matches!(

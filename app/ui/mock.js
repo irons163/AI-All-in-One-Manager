@@ -25,6 +25,22 @@
       install: 'npm install -g @anthropic-ai/claude-code', has_backup: true,
     },
     {
+      id: 'claude-desktop', name: 'Claude Desktop', builtin: true, cli: null, cli_installed: true,
+      app: 'Claude', app_running: true,
+      logged_in: true, live_identity: '0e58fc24-9663-4eba-a2f5-04424cd4a921', active: 'main', matches_active: true,
+      accounts: [
+        account('main', '0e58fc24-9663-4eba-a2f5-04424cd4a921', '個人', 7200, true),
+        account('team', '7c1d2e3f-1111-4aaa-9bbb-222233334444', '團隊方案', 86400 * 3),
+      ],
+      artifacts: [
+        { location: '~/Library/Application Support/Claude/config.json [oauth:tokenCacheV2, oauth:tokenCache]', primary: true, present: true },
+        { location: '~/Library/Application Support/Claude/Cookies', primary: false, present: true },
+        { location: '~/Library/Application Support/Claude/Local Storage/', primary: false, present: true },
+      ],
+      login_command: null,
+      install: null, has_backup: true,
+    },
+    {
       id: 'codex', name: 'Codex CLI', builtin: true, cli: 'codex', cli_installed: true,
       logged_in: true, live_identity: 'someone@new.example', active: null, matches_active: false,
       accounts: [],

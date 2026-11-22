@@ -15,8 +15,73 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 const KEEP_BACKUPS: usize = 10;
+/// How long to wait for a desktop app to quit after asking it to.
+const QUIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Clone, Copy, PartialEq)]
+enum Relaunch {
+    /// Start the app again only if it was running before.
+    IfWasRunning,
+    /// Start the app afterwards in any case (the user has to act in it).
+    Always,
+}
+
+/// Run `f` with the provider's desktop app closed, for providers that have
+/// one. The app is asked to quit normally; if it is still running after
+/// `QUIT_TIMEOUT` (it may be asking the user to confirm), nothing is changed.
+/// Returns whether the app was started again afterwards.
+fn with_app_closed<T>(
+    ctx: &Ctx,
+    p: &Provider,
+    relaunch: Relaunch,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<(T, bool)> {
+    let Some(app) = &p.app else {
+        return f().map(|value| (value, false));
+    };
+    let was_running = ctx.apps.is_running(&app.bundle_id)?;
+    if was_running {
+        ctx.apps.quit(&app.bundle_id)?;
+        let timeout = ctx
+            .var("AIOM_QUIT_TIMEOUT_SECS")
+            .and_then(|v| v.parse().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(QUIT_TIMEOUT);
+        let deadline = Instant::now() + timeout;
+        while ctx.apps.is_running(&app.bundle_id)? {
+            if Instant::now() >= deadline {
+                bail!(
+                    "{} did not quit within {} seconds; nothing was changed. It may be waiting for you to confirm, or macOS may not allow this program to control it (System Settings > Privacy & Security > Automation)",
+                    app.name,
+                    timeout.as_secs()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+    let result = f();
+    let start = match relaunch {
+        Relaunch::Always => true,
+        Relaunch::IfWasRunning => was_running,
+    };
+    let mut started = false;
+    if start {
+        match ctx.apps.launch(&app.bundle_id) {
+            Ok(()) => started = true,
+            Err(err) if result.is_ok() => {
+                return Err(err.context(format!(
+                    "the change was made, but {} could not be started again",
+                    app.name
+                )))
+            }
+            Err(_) => {}
+        }
+    }
+    result.map(|value| (value, started))
+}
 
 /// Content of every artifact of a provider, in artifact order.
 type Live = Vec<Option<Vec<u8>>>;
@@ -332,7 +397,8 @@ fn fresh_name(accounts: &[Meta], identity: Option<&str>) -> String {
         store::validate_name(name).is_ok() && !accounts.iter().any(|m| m.name == name)
     };
     let mut candidates = Vec::new();
-    if let Some(identity) = identity {
+    // Only an email makes a readable name; an opaque id (a UUID) does not.
+    if let Some(identity) = identity.filter(|i| i.contains('@')) {
         candidates.push(clean(identity.split('@').next().unwrap_or(identity)));
         candidates.push(clean(identity));
     }
@@ -398,8 +464,17 @@ pub fn adopt(ctx: &Ctx, p: &Provider) -> Result<Option<Adopted>> {
         }));
     }
 
-    let name = fresh_name(&accounts, live_id.as_deref());
+    let state = store::load_state(ctx)?;
+    let pending = state
+        .pending
+        .get(&p.id)
+        .filter(|n| store::validate_name(n).is_ok() && !accounts.iter().any(|m| &m.name == *n))
+        .cloned();
+    let name = pending.unwrap_or_else(|| fresh_name(&accounts, live_id.as_deref()));
     let meta = save(ctx, p, &name, false, None)?;
+    if state.pending.contains_key(&p.id) {
+        store::set_pending(ctx, &p.id, None)?;
+    }
     Ok(Some(Adopted {
         name: meta.name,
         identity: meta.identity,
@@ -418,6 +493,8 @@ pub struct SwitchReport {
     pub synced: bool,
     pub backup: Option<PathBuf>,
     pub warnings: Vec<String>,
+    /// The provider's desktop app was closed for the switch and started again.
+    pub restarted_app: Option<String>,
 }
 
 /// Switch the provider's live login to account `name`.
@@ -430,10 +507,6 @@ pub fn switch(ctx: &Ctx, p: &Provider, name: &str, force: bool) -> Result<Switch
         )
     })?;
     let active = store::active(ctx, &p.id)?;
-    let live = read_live(ctx, p)?;
-    let logged_in = has_primary(p, &live);
-    let live_id = p.live_identity();
-
     let mut report = SwitchReport {
         from: active.clone(),
         to: name.to_string(),
@@ -442,13 +515,36 @@ pub fn switch(ctx: &Ctx, p: &Provider, name: &str, force: bool) -> Result<Switch
     };
 
     let same = active.as_deref() == Some(name);
-    if same && logged_in && compatible(&live_id, &target.identity) && !force {
+    if same && !force && p.logged_in(ctx) && compatible(&p.live_identity(), &target.identity) {
         // The live copy is this account and is at least as fresh as the
-        // snapshot; re-applying could roll back a refreshed token.
+        // snapshot; re-applying could roll back a refreshed token. Checked
+        // before closing any app, so a no-op switch never interrupts it.
         report.already_active = true;
         return Ok(report);
     }
 
+    let (_, restarted) = with_app_closed(ctx, p, Relaunch::IfWasRunning, || {
+        switch_closed(ctx, p, name, &target, active.as_deref(), &mut report)
+    })?;
+    if restarted {
+        report.restarted_app = p.app.as_ref().map(|app| app.name.clone());
+    }
+    Ok(report)
+}
+
+/// The part of `switch` that touches live files; runs with any app closed.
+fn switch_closed(
+    ctx: &Ctx,
+    p: &Provider,
+    name: &str,
+    target: &Meta,
+    active: Option<&str>,
+    report: &mut SwitchReport,
+) -> Result<()> {
+    let same = active == Some(name);
+    let live = read_live(ctx, p)?;
+    let logged_in = has_primary(p, &live);
+    let live_id = p.live_identity();
     if logged_in {
         let made = backup(ctx, p, &live)?;
         if same {
@@ -462,21 +558,14 @@ pub fn switch(ctx: &Ctx, p: &Provider, name: &str, force: bool) -> Result<Switch
                 ));
             }
         } else {
-            report.synced = sync_back(
-                ctx,
-                p,
-                &live,
-                active.as_deref(),
-                &made.loc.dir,
-                &mut report.warnings,
-            )?;
+            report.synced = sync_back(ctx, p, &live, active, &made.loc.dir, &mut report.warnings)?;
         }
         report.backup = Some(made.loc.dir);
     }
 
     apply(ctx, p, &store::profile_loc(ctx, &p.id, name), &target.artifacts)?;
     store::set_active(ctx, &p.id, Some(name))?;
-    Ok(report)
+    Ok(())
 }
 
 /// The account after the active one, wrapping around.
@@ -644,13 +733,53 @@ pub fn restore(ctx: &Ctx, p: &Provider) -> Result<(PathBuf, Option<String>)> {
     let meta_path = loc.dir.join("meta.json");
     let meta: BackupMeta = serde_json::from_str(&fs::read_to_string(&meta_path)?)
         .with_context(|| format!("parsing {}", meta_path.display()))?;
-    apply(ctx, p, &loc, &meta.artifacts)?;
-    store::set_active(ctx, &p.id, None)?;
+    with_app_closed(ctx, p, Relaunch::IfWasRunning, || {
+        apply(ctx, p, &loc, &meta.artifacts)?;
+        store::set_active(ctx, &p.id, None)
+    })?;
     Ok((loc.dir, meta.identity))
 }
 
+/// For a provider whose login happens inside its desktop app: close the app,
+/// set the current login aside (backed up, and folded into its account),
+/// sign the app out locally, and start it again so the user can sign in to
+/// another account there. `name`, if given, is used for that account when it
+/// is saved (by `adopt`, once the new login appears).
+pub fn app_logout(ctx: &Ctx, p: &Provider, name: Option<&str>) -> Result<Vec<String>> {
+    let app = p
+        .app
+        .as_ref()
+        .ok_or_else(|| anyhow!("{} is not a desktop app", p.name))?;
+    if p.installed_path(ctx).is_none() {
+        bail!("{} is not installed", app.name);
+    }
+    if let Some(name) = name {
+        store::validate_name(name)?;
+        if store::load_meta(ctx, &p.id, name)?.is_some() {
+            bail!("{} account '{name}' already exists", p.name);
+        }
+    }
+    let mut warnings = Vec::new();
+    with_app_closed(ctx, p, Relaunch::Always, || {
+        let live = read_live(ctx, p)?;
+        if has_primary(p, &live) {
+            let made = backup(ctx, p, &live)?;
+            let active = store::active(ctx, &p.id)?;
+            sync_back(ctx, p, &live, active.as_deref(), &made.loc.dir, &mut warnings)?;
+        }
+        let empty = Loc {
+            dir: PathBuf::new(),
+            service: String::new(),
+        };
+        apply(ctx, p, &empty, &[])?;
+        store::set_active(ctx, &p.id, None)?;
+        store::set_pending(ctx, &p.id, name)
+    })?;
+    Ok(warnings)
+}
+
 pub struct Status {
-    /// Path of the provider's CLI, if it is installed.
+    /// Path of the provider's CLI or desktop app, if it is installed.
     pub binary: Option<PathBuf>,
     pub logged_in: bool,
     pub live_identity: Option<String>,
@@ -673,10 +802,7 @@ pub fn status(ctx: &Ctx, p: &Provider) -> Result<Status> {
         None => false,
     };
     Ok(Status {
-        binary: p
-            .binary
-            .as_deref()
-            .and_then(|b| util::find_in_path(b, ctx.var("PATH"))),
+        binary: p.installed_path(ctx),
         logged_in,
         live_identity,
         active,

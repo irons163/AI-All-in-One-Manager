@@ -1,12 +1,15 @@
 //! An artifact is one piece of a provider's login state: a whole file, a few
-//! keys inside a shared JSON file, or an item in the OS keychain.
+//! keys inside a shared JSON file, a whole directory, or an item in the OS
+//! keychain.
 
 use crate::ctx::Ctx;
-use crate::util::{atomic_write, json_get, json_remove, json_set};
-use anyhow::{Context, Result};
+use crate::util::{atomic_write, json_get, json_remove, json_set, set_mode};
+use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
 use std::fs;
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub enum Kind {
@@ -16,6 +19,9 @@ pub enum Kind {
     /// file is left alone (e.g. `oauthAccount` inside `~/.claude.json`).
     /// Keys are dotted paths. The snapshot is a JSON object of key -> value.
     JsonKeys { path: PathBuf, keys: Vec<String> },
+    /// A whole directory tree (e.g. an app's local web storage). The snapshot
+    /// is a single archive of every file in it.
+    Dir { path: PathBuf },
     /// A generic-password item in the OS keychain.
     Keychain { service: String, account: String },
 }
@@ -49,6 +55,14 @@ impl Artifact {
         }
     }
 
+    pub fn dir(id: &str, path: PathBuf, primary: bool) -> Self {
+        Artifact {
+            id: id.to_string(),
+            kind: Kind::Dir { path },
+            primary,
+        }
+    }
+
     pub fn keychain(id: &str, service: &str, account: &str, primary: bool) -> Self {
         Artifact {
             id: id.to_string(),
@@ -64,6 +78,7 @@ impl Artifact {
         match &self.kind {
             Kind::File { path } => path.display().to_string(),
             Kind::JsonKeys { path, keys } => format!("{} [{}]", path.display(), keys.join(", ")),
+            Kind::Dir { path } => format!("{}/", path.display()),
             Kind::Keychain { service, account } => format!("keychain: {service} ({account})"),
         }
     }
@@ -73,6 +88,7 @@ impl Artifact {
         match &self.kind {
             Kind::File { path } => path.is_file(),
             Kind::JsonKeys { .. } => matches!(self.read_live(ctx), Ok(Some(_))),
+            Kind::Dir { path } => path.is_dir(),
             Kind::Keychain { service, account } => {
                 ctx.secrets.exists(service, account).unwrap_or(false)
             }
@@ -86,7 +102,7 @@ impl Artifact {
                 if !path.is_file() {
                     return Ok(None);
                 }
-                fs::read(path)
+                read_stable(path)
                     .map(Some)
                     .with_context(|| format!("reading {}", path.display()))
             }
@@ -105,6 +121,14 @@ impl Artifact {
                 }
                 Ok(Some(serde_json::to_vec_pretty(&Value::Object(snap))?))
             }
+            Kind::Dir { path } => {
+                if !path.is_dir() {
+                    return Ok(None);
+                }
+                pack_dir(path)
+                    .map(Some)
+                    .with_context(|| format!("reading {}", path.display()))
+            }
             Kind::Keychain { service, account } => Ok(ctx
                 .secrets
                 .get(service, account)?
@@ -115,16 +139,18 @@ impl Artifact {
     /// Replace the artifact's content, or remove it when `data` is `None`.
     pub fn write_live(&self, ctx: &Ctx, data: Option<&[u8]>) -> Result<()> {
         match &self.kind {
-            Kind::File { path } => match data {
-                Some(bytes) => atomic_write(path, bytes),
-                None => {
-                    if path.is_file() {
-                        fs::remove_file(path)
-                            .with_context(|| format!("removing {}", path.display()))?;
+            Kind::File { path } => {
+                match data {
+                    Some(bytes) => atomic_write(path, bytes)?,
+                    None => {
+                        if path.is_file() {
+                            fs::remove_file(path)
+                                .with_context(|| format!("removing {}", path.display()))?;
+                        }
                     }
-                    Ok(())
                 }
-            },
+                remove_sqlite_sidecars(path)
+            }
             Kind::JsonKeys { path, keys } => {
                 let snap: Map<String, Value> = match data {
                     Some(bytes) => serde_json::from_slice(bytes)
@@ -154,6 +180,12 @@ impl Artifact {
                 }
                 atomic_write(path, style.render(&root)?.as_bytes())
             }
+            Kind::Dir { path } => match data {
+                Some(bytes) => replace_dir(path, bytes)
+                    .with_context(|| format!("replacing {}", path.display())),
+                None => remove_dir(path)
+                    .with_context(|| format!("removing {}", path.display())),
+            },
             Kind::Keychain { service, account } => match data {
                 Some(bytes) => {
                     let secret = std::str::from_utf8(bytes)
@@ -164,6 +196,213 @@ impl Artifact {
             },
         }
     }
+}
+
+// ---- files that another program may be writing ---------------------------------
+
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+fn non_empty(path: &Path) -> bool {
+    fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false)
+}
+
+/// Read a file that a running app may be writing. For an SQLite database in
+/// rollback-journal mode, a non-empty `-journal` means a write is in
+/// progress, so wait for it to finish and make sure nothing changed while
+/// reading.
+fn read_stable(path: &Path) -> Result<Vec<u8>> {
+    let journal = sidecar(path, "-journal");
+    let modified = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    for _ in 0..40 {
+        if non_empty(&journal) {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        let before = modified(path);
+        let data = fs::read(path)?;
+        if !non_empty(&journal) && modified(path) == before {
+            return Ok(data);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    bail!("it kept changing while being read; try again in a moment")
+}
+
+/// After an SQLite database file is replaced, its old journal, write-ahead
+/// log and shared-memory files belong to a different database. SQLite would
+/// replay them into the new one and corrupt it, so remove them.
+fn remove_sqlite_sidecars(path: &Path) -> Result<()> {
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let side = sidecar(path, suffix);
+        if side.is_file() {
+            fs::remove_file(&side).with_context(|| format!("removing {}", side.display()))?;
+        }
+    }
+    Ok(())
+}
+
+// ---- directory snapshots --------------------------------------------------------
+
+const DIR_MAGIC: &[u8] = b"AIOMDIR1";
+
+/// Serialise a directory tree into one byte string: the magic header, then
+/// for each entry in sorted order a kind byte (`d` or `f`), the relative path
+/// and, for files, the content. Symbolic links are skipped. Files that
+/// disappear while reading (an app cleaning up) are skipped too.
+pub fn pack_dir(root: &Path) -> Result<Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<u8>) -> Result<()> {
+        let mut entries: Vec<_> = match fs::read_dir(dir) {
+            Ok(entries) => entries.flatten().collect(),
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err).with_context(|| format!("listing {}", dir.display())),
+        };
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else { continue };
+            let rel = path.strip_prefix(root).expect("walked from root");
+            let rel = rel
+                .to_str()
+                .with_context(|| format!("{} is not a UTF-8 path", path.display()))?;
+            if meta.is_dir() {
+                push_entry(out, b'd', rel, None);
+                walk(root, &path, out)?;
+            } else if meta.is_file() {
+                match fs::read(&path) {
+                    Ok(data) => push_entry(out, b'f', rel, Some(&data)),
+                    Err(err) if err.kind() == ErrorKind::NotFound => {}
+                    Err(err) => {
+                        return Err(err).with_context(|| format!("reading {}", path.display()))
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut out = DIR_MAGIC.to_vec();
+    walk(root, root, &mut out)?;
+    Ok(out)
+}
+
+fn push_entry(out: &mut Vec<u8>, kind: u8, rel: &str, data: Option<&[u8]>) {
+    out.push(kind);
+    out.extend_from_slice(&(rel.len() as u32).to_be_bytes());
+    out.extend_from_slice(rel.as_bytes());
+    if let Some(data) = data {
+        out.extend_from_slice(&(data.len() as u64).to_be_bytes());
+        out.extend_from_slice(data);
+    }
+}
+
+/// Recreate a tree produced by `pack_dir` under `dest`, which must not exist.
+/// Rejects any path that would land outside `dest`.
+pub fn unpack_dir(bytes: &[u8], dest: &Path) -> Result<()> {
+    fn take<'a>(bytes: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8]> {
+        let end = at.checked_add(n).filter(|end| *end <= bytes.len());
+        let Some(end) = end else { bail!("directory snapshot is truncated") };
+        let slice = &bytes[*at..end];
+        *at = end;
+        Ok(slice)
+    }
+    if !bytes.starts_with(DIR_MAGIC) {
+        bail!("not a directory snapshot");
+    }
+    fs::create_dir(dest).with_context(|| format!("creating {}", dest.display()))?;
+    set_mode(dest, 0o700)?;
+    let mut at = DIR_MAGIC.len();
+    while at < bytes.len() {
+        let kind = take(bytes, &mut at, 1)?[0];
+        let len = u32::from_be_bytes(take(bytes, &mut at, 4)?.try_into().unwrap()) as usize;
+        let rel = std::str::from_utf8(take(bytes, &mut at, len)?)
+            .context("directory snapshot has a non-UTF-8 path")?;
+        let rel_path = Path::new(rel);
+        let safe = !rel.is_empty()
+            && rel_path
+                .components()
+                .all(|c| matches!(c, Component::Normal(_)));
+        if !safe {
+            bail!("directory snapshot has an unsafe path: {rel:?}");
+        }
+        let target = dest.join(rel_path);
+        match kind {
+            b'd' => {
+                fs::create_dir_all(&target)?;
+                set_mode(&target, 0o700)?;
+            }
+            b'f' => {
+                let size = u64::from_be_bytes(take(bytes, &mut at, 8)?.try_into().unwrap());
+                let data = take(bytes, &mut at, usize::try_from(size)?)?;
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&target, data)?;
+                set_mode(&target, 0o600)?;
+            }
+            other => bail!("directory snapshot has an unknown entry kind {other}"),
+        }
+    }
+    Ok(())
+}
+
+fn temp_sibling(path: &Path, tag: &str) -> Result<PathBuf> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .with_context(|| format!("{} has no usable name", path.display()))?;
+    Ok(path.with_file_name(format!(".{name}.aiom-{tag}-{}", std::process::id())))
+}
+
+/// Swap `path` for the tree in `bytes`. The new tree is built next to the
+/// old one first, so a bad snapshot leaves the current directory untouched.
+fn replace_dir(path: &Path, bytes: &[u8]) -> Result<()> {
+    if path.exists() && !path.is_dir() {
+        bail!("{} exists but is not a directory", path.display());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let fresh = temp_sibling(path, "new")?;
+    if fresh.exists() {
+        fs::remove_dir_all(&fresh)?;
+    }
+    if let Err(err) = unpack_dir(bytes, &fresh) {
+        let _ = fs::remove_dir_all(&fresh);
+        return Err(err);
+    }
+    if path.is_dir() {
+        let old = temp_sibling(path, "old")?;
+        if old.exists() {
+            fs::remove_dir_all(&old)?;
+        }
+        fs::rename(path, &old)?;
+        if let Err(err) = fs::rename(&fresh, path) {
+            let _ = fs::rename(&old, path);
+            let _ = fs::remove_dir_all(&fresh);
+            return Err(err.into());
+        }
+        fs::remove_dir_all(&old)?;
+    } else {
+        fs::rename(&fresh, path)?;
+    }
+    Ok(())
+}
+
+fn remove_dir(path: &Path) -> Result<()> {
+    if !path.is_dir() {
+        return Ok(());
+    }
+    // Move it out of the way first so the name is free at once.
+    let old = temp_sibling(path, "old")?;
+    if old.exists() {
+        fs::remove_dir_all(&old)?;
+    }
+    fs::rename(path, &old)?;
+    fs::remove_dir_all(&old)?;
+    Ok(())
 }
 
 /// How a JSON file was formatted on disk, so it can be written back the same way.
@@ -270,6 +509,88 @@ mod tests {
         assert!(art.read_live(&ctx).unwrap().is_none());
         art.write_live(&ctx, Some(b"{\"a\": 2}")).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn dir_artifact_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Ctx::for_test(tmp.path(), false);
+        let dir = tmp.path().join("Local Storage");
+        fs::create_dir_all(dir.join("leveldb/sub")).unwrap();
+        fs::create_dir_all(dir.join("empty")).unwrap();
+        fs::write(dir.join("leveldb/CURRENT"), "MANIFEST-1\n").unwrap();
+        fs::write(dir.join("leveldb/sub/000003.log"), [0u8, 1, 2, 255]).unwrap();
+        let art = Artifact::dir("ls", dir.clone(), false);
+        assert!(art.exists_live(&ctx));
+
+        let a = art.read_live(&ctx).unwrap().unwrap();
+        assert_eq!(a, art.read_live(&ctx).unwrap().unwrap(), "packing is deterministic");
+
+        // Change the tree, then put the first version back.
+        fs::remove_dir_all(dir.join("leveldb/sub")).unwrap();
+        fs::write(dir.join("leveldb/CURRENT"), "MANIFEST-9\n").unwrap();
+        fs::write(dir.join("extra.txt"), "b").unwrap();
+        art.write_live(&ctx, Some(&a)).unwrap();
+        assert_eq!(fs::read(dir.join("leveldb/sub/000003.log")).unwrap(), [0, 1, 2, 255]);
+        assert_eq!(fs::read_to_string(dir.join("leveldb/CURRENT")).unwrap(), "MANIFEST-1\n");
+        assert!(dir.join("empty").is_dir());
+        assert!(!dir.join("extra.txt").exists());
+        assert_eq!(art.read_live(&ctx).unwrap().unwrap(), a);
+        let leftovers = fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains("aiom-"))
+            .count();
+        assert_eq!(leftovers, 0);
+
+        art.write_live(&ctx, None).unwrap();
+        assert!(!dir.exists());
+        assert!(art.read_live(&ctx).unwrap().is_none());
+    }
+
+    #[test]
+    fn unpack_rejects_bad_snapshots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut evil = DIR_MAGIC.to_vec();
+        push_entry(&mut evil, b'f', "../escape", Some(b"x"));
+        assert!(unpack_dir(&evil, &tmp.path().join("a")).is_err());
+        assert!(!tmp.path().join("escape").exists());
+
+        let mut absolute = DIR_MAGIC.to_vec();
+        push_entry(&mut absolute, b'f', "/etc/x", Some(b"x"));
+        assert!(unpack_dir(&absolute, &tmp.path().join("b")).is_err());
+
+        let mut truncated = DIR_MAGIC.to_vec();
+        push_entry(&mut truncated, b'f', "file", Some(b"hello"));
+        truncated.truncate(truncated.len() - 2);
+        assert!(unpack_dir(&truncated, &tmp.path().join("c")).is_err());
+
+        // A failed replace leaves the live directory as it was.
+        let ctx = Ctx::for_test(tmp.path(), false);
+        let live = tmp.path().join("live");
+        fs::create_dir_all(&live).unwrap();
+        fs::write(live.join("keep"), "1").unwrap();
+        let art = Artifact::dir("d", live.clone(), false);
+        assert!(art.write_live(&ctx, Some(&truncated)).is_err());
+        assert_eq!(fs::read_to_string(live.join("keep")).unwrap(), "1");
+    }
+
+    #[test]
+    fn replacing_an_sqlite_file_drops_its_old_journal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = Ctx::for_test(tmp.path(), false);
+        let db = tmp.path().join("Cookies");
+        fs::write(&db, "db-a").unwrap();
+        let art = Artifact::file("Cookies", db.clone(), false);
+        let a = art.read_live(&ctx).unwrap().unwrap();
+
+        fs::write(&db, "db-b").unwrap();
+        fs::write(tmp.path().join("Cookies-journal"), "hot journal of b").unwrap();
+        fs::write(tmp.path().join("Cookies-wal"), "wal of b").unwrap();
+        art.write_live(&ctx, Some(&a)).unwrap();
+        assert_eq!(fs::read_to_string(&db).unwrap(), "db-a");
+        assert!(!tmp.path().join("Cookies-journal").exists());
+        assert!(!tmp.path().join("Cookies-wal").exists());
     }
 
     #[test]

@@ -107,6 +107,12 @@ function checkName(values) {
 
 // ---- drawing ----
 
+// Emails are shown as they are; an opaque account id (a UUID) is shortened.
+function showIdentity(identity) {
+  if (!identity) return '';
+  return identity.includes('@') ? identity : `帳號 ID ${identity.slice(0, 8)}…`;
+}
+
 function providerSummary(p) {
   if (p.logged_in && p.active && p.matches_active) return { dot: 'ok', text: p.active };
   if (p.logged_in && p.active) return { dot: 'warn', text: '登入與帳號不一致' };
@@ -130,12 +136,19 @@ function drawSidebar() {
 }
 
 function drawLive(p) {
-  const identity = esc(p.live_identity || '已登入');
+  const identity = esc(showIdentity(p.live_identity) || '已登入');
   if (!p.logged_in) {
     const how = p.login_command ? `，或在終端機執行 <code>${esc(p.login_command)}</code>` : '';
-    const hint = p.cli_installed
-      ? `按「登入新帳號」開始${how}。`
-      : `這台電腦還沒有安裝 ${esc(p.name)} 的命令列工具，安裝後就能在這裡登入與管理帳號。`;
+    let hint;
+    if (p.app) {
+      hint = p.cli_installed
+        ? `在 ${esc(p.app)} 裡登入後回到這裡，AIOM 會自動存成帳號。`
+        : `這台電腦找不到 ${esc(p.app)} App。`;
+    } else {
+      hint = p.cli_installed
+        ? `按「登入新帳號」開始${how}。`
+        : `這台電腦還沒有安裝 ${esc(p.name)} 的命令列工具，安裝後就能在這裡登入與管理帳號。`;
+    }
     return `
       <section class="card live">
         <div class="who">
@@ -174,7 +187,7 @@ function drawAccounts(p) {
     return '<div class="card none">還沒有儲存任何帳號。</div>';
   }
   const rows = p.accounts.map((a) => {
-    const meta = [a.identity, a.note, `存於 ${when(a.updated_at)}`].filter(Boolean).map(esc).join(' · ');
+    const meta = [showIdentity(a.identity), a.note, `存於 ${when(a.updated_at)}`].filter(Boolean).map(esc).join(' · ');
     const badge = a.active
       ? (p.matches_active
         ? '<span class="chip ok">使用中</span>'
@@ -203,14 +216,18 @@ function drawAccounts(p) {
 
 // Things worth knowing about one provider that the backend cannot tell.
 const PROVIDER_NOTES = {
-  claude: 'Claude 桌面 App 的登入是另外一回事，這裡管理的是 Claude Code 命令列工具（claude 指令）的登入。',
+  claude: '這裡管理的是 Claude Code 命令列工具（claude 指令）的登入。Claude 桌面 App 的帳號請到左側的「Claude Desktop」管理。',
 };
 
 // Why each unavailable button is unavailable, in the order the buttons appear.
 // A greyed-out button with no explanation just looks broken.
 function disabledReasons(p) {
   const reasons = [];
-  if (!p.cli_installed) {
+  if (p.app && !p.cli_installed) {
+    reasons.push(`<b>登入新帳號</b>：這台電腦找不到 ${esc(p.app)} App。`);
+  } else if (p.app) {
+    // Logging in happens inside the app, so the button is always usable.
+  } else if (!p.cli_installed) {
     const install = p.install
       ? `在終端機執行 <code class="selectable">${esc(p.install)}</code> 安裝`
       : `依 ${esc(p.name)} 的官方說明安裝`;
@@ -241,12 +258,19 @@ function drawMain() {
     $('main').innerHTML = '<p class="empty">沒有可用的 provider。</p>';
     return;
   }
-  const cliChip = p.cli_installed
-    ? '<span class="chip ok">CLI 已安裝</span>'
-    : `<span class="chip warn">找不到 ${esc(p.cli || 'CLI')} 指令</span>`;
+  let cliChip;
+  if (p.app) {
+    cliChip = p.cli_installed
+      ? `<span class="chip ok">${esc(p.app)} App ${p.app_running ? '執行中' : '已安裝'}</span>`
+      : `<span class="chip warn">找不到 ${esc(p.app)} App</span>`;
+  } else {
+    cliChip = p.cli_installed
+      ? '<span class="chip ok">CLI 已安裝</span>'
+      : `<span class="chip warn">找不到 ${esc(p.cli || 'CLI')} 指令</span>`;
+  }
   const customChip = p.builtin ? '' : '<span class="chip">自訂</span>';
   const canSave = p.logged_in;
-  const canLogin = p.cli_installed && p.login_command;
+  const canLogin = p.cli_installed && (p.app || p.login_command);
   const canSync = p.logged_in && p.active;
   const reasons = disabledReasons(p);
   const locations = p.artifacts.map((a) => `
@@ -344,11 +368,22 @@ function suggestName(p) {
   return NAME_RULE.test(local) ? local : '';
 }
 
+// A desktop app has to be closed while its login is swapped. Say so first,
+// because whatever is going on in it (including this kind of chat) stops.
+async function confirmAppRestart(p, what) {
+  if (!p.app || !p.app_running) return true;
+  return Boolean(await ask({
+    title: `${what}需要先關閉 ${p.app}`,
+    body: `AIOM 會關閉 ${p.app}、替換登入資料，完成後自動重新開啟。${p.app} 裡進行中的對話與工作（包括在 ${p.app} 裡執行的 Claude Code 工作階段）會被中斷，重新開啟後可以從側邊欄接回。`,
+    ok: `關閉 ${p.app} 並切換`,
+  }));
+}
+
 const actions = {
   async save(p) {
     const values = await ask({
       title: `儲存目前的 ${p.name} 登入`,
-      body: p.live_identity ? `目前登入：${p.live_identity}` : '',
+      body: p.live_identity ? `目前登入：${showIdentity(p.live_identity)}` : '',
       fields: [
         { key: 'name', label: '帳號名稱', value: suggestName(p), placeholder: '例如 work 或 personal' },
         { key: 'note', label: '備註（選填）', placeholder: '例如 公司帳號' },
@@ -373,9 +408,12 @@ const actions = {
   },
 
   async login(p) {
+    const body = p.app
+      ? `AIOM 會關閉 ${p.app}、備份目前的登入並登出，再重新開啟 ${p.app}。請在 ${p.app} 裡登入另一個帳號，回到 AIOM 後會自動存檔。${p.app} 裡進行中的對話與工作會被中斷。`
+      : `會開啟終端機視窗執行「${p.login_command}」。目前的登入會先備份，登入成功後新帳號會自動存檔；沒完成的話會還原。`;
     const values = await ask({
       title: `登入 ${p.name} 的新帳號`,
-      body: `會開啟終端機視窗執行「${p.login_command}」。目前的登入會先備份，登入成功後新帳號會自動存檔；沒完成的話會還原。`,
+      body,
       fields: [{ key: 'name', label: '新帳號的名稱', placeholder: '例如 personal' }],
       ok: '開始登入',
       validate: (v) => checkName(v)
@@ -386,10 +424,12 @@ const actions = {
   },
 
   async switch(p, { name, force }) {
+    if (!(await confirmAppRestart(p, `切換到「${name}」`))) return;
     await perform('switch_account', { provider: p.id, name, force: Boolean(force) });
   },
 
   async next(p) {
+    if (!(await confirmAppRestart(p, '切換到下一個帳號'))) return;
     await perform('next_account', { provider: p.id });
   },
 
@@ -420,9 +460,12 @@ const actions = {
   },
 
   async restore(p) {
+    const closes = p.app && p.app_running
+      ? `會先關閉 ${p.app}，完成後重新開啟；進行中的對話與工作會被中斷。`
+      : '';
     const sure = await ask({
       title: `還原 ${p.name} 的登入？`,
-      body: '登入會回到上一次切換之前的狀態，之後不會有使用中的帳號。',
+      body: `登入會回到上一次切換之前的狀態，之後不會有使用中的帳號。${closes}`,
       ok: '還原',
     });
     if (sure) await perform('restore_login', { provider: p.id });
